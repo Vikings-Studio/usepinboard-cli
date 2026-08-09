@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { resolve } from "node:path";
 import { validatePurgeTarget } from "../src/platform/paths.js";
 
 describe("purge target validation", () => {
@@ -6,7 +7,7 @@ describe("purge target validation", () => {
     expect(validatePurgeTarget("/Users/example/Library/Application Support/Pinboard", {
       cwd: "/workspace/project",
       home: "/Users/example",
-    })).toBe("/Users/example/Library/Application Support/Pinboard");
+    })).toBe(resolve("/Users/example/Library/Application Support/Pinboard"));
   });
 
   it.each(["/", "/Users/example", "/workspace/project"])("rejects broad target %s", (target) => {
