@@ -73,6 +73,28 @@ describe("daemon IPC", () => {
     }
   });
 
+  it("keeps provider-hook capabilities stable across repeated events", async () => {
+    const paths = await temporaryPaths();
+    cleanup.push(paths.dataDir);
+    const daemon = await startDaemon({ version: "test", paths });
+    try {
+      const client = new DaemonClient(paths);
+      const id = randomUUID();
+      const input = {
+        id,
+        provider: "claude-code" as const,
+        providerSessionId: "claude-session-1",
+        repository: { identity: "local:hooks", name: "hooks", root: "/tmp/hooks", branch: "main" },
+      };
+      const first = await client.post<SessionRegistration>("/v1/sessions", input);
+      const second = await client.post<SessionRegistration>("/v1/sessions", input);
+      expect(second.capability).toBe(first.capability);
+      await expect(client.post(`/v1/sessions/${id}/heartbeat`, {}, first.capability)).resolves.toMatchObject({ id });
+    } finally {
+      await daemon.close();
+    }
+  });
+
   it("rejects an incompatible protocol major with upgrade required", async () => {
     const paths = await temporaryPaths();
     cleanup.push(paths.dataDir);

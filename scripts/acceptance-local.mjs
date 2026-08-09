@@ -23,6 +23,16 @@ function runJson(args, cwd = root, extraEnvironment = {}) {
   return JSON.parse(run(args, cwd, extraEnvironment));
 }
 
+function runHook(payload, cwd = root) {
+  return execFileSync(process.execPath, [cli, "hook", "claude-code"], {
+    cwd,
+    env: environment,
+    input: JSON.stringify(payload),
+    encoding: "utf8",
+    stdio: ["pipe", "pipe", "pipe"],
+  }).trim();
+}
+
 const daemon = spawn(process.execPath, [cli, "daemon", "run"], {
   cwd: root,
   env: environment,
@@ -60,6 +70,13 @@ try {
     throw new Error("Two-session presence discovery failed");
   }
 
+  const hookProviderSessionId = "acceptance-claude-hook-session";
+  runHook({ hook_event_name: "UserPromptSubmit", session_id: hookProviderSessionId, cwd: root, prompt: "hook acceptance" });
+  const presenceWithHook = runJson(["who", "--include-idle", "--json"]);
+  const hookSession = presenceWithHook.find((candidate) => candidate.providerSessionId === hookProviderSessionId);
+  if (!hookSession) throw new Error("Claude lifecycle hook did not register presence");
+  if (hookSession.taskLabel) throw new Error("Claude prompt content leaked into presence metadata");
+
   const idempotencyKey = randomUUID();
   const first = runJson([
     "send",
@@ -82,6 +99,25 @@ try {
     "--json",
   ], root, codexEnvironment);
   if (first.message?.id !== retry.message?.id) throw new Error("Idempotent CLI retry produced a duplicate message");
+
+  const hookMessage = runJson([
+    "send",
+    hookSession.id,
+    "Safe-point delivery contract",
+    "--from-session",
+    codex.id,
+    "--idempotency-key",
+    randomUUID(),
+    "--json",
+  ], root, codexEnvironment);
+  const safePointRaw = runHook({ hook_event_name: "PostToolUse", session_id: hookProviderSessionId, cwd: root, tool_name: "Read", tool_input: { file_path: join(root, "README.md") } });
+  const safePoint = JSON.parse(safePointRaw);
+  const safeContext = safePoint.hookSpecificOutput?.additionalContext ?? "";
+  if (!safeContext.includes(hookMessage.message.id) || !safeContext.includes("UNTRUSTED MESSAGE FROM ANOTHER AGENT")) {
+    throw new Error("Claude safe-point hook did not surface attributed untrusted context");
+  }
+  const repeatedSafePoint = runHook({ hook_event_name: "PostToolUse", session_id: hookProviderSessionId, cwd: root, tool_name: "Read", tool_input: { file_path: join(root, "README.md") } });
+  if (repeatedSafePoint !== "") throw new Error("Claude hook delivered the same queued message more than once");
 
   const inbox = runJson(["inbox", "--session", claude.id, "--unread-only", "--json"], root, claudeEnvironment);
   if (inbox.length !== 1 || inbox[0]?.id !== first.message.id) throw new Error("Recipient inbox delivery failed");
@@ -117,17 +153,29 @@ try {
   ], root, claudeEnvironment);
   const statusWithLease = runJson(["status", "--json"]);
   if (statusWithLease.status?.activeLeases !== 1) throw new Error("Lease did not appear in daemon discovery state");
+  const preEditRaw = runHook({
+    hook_event_name: "PreToolUse",
+    session_id: hookProviderSessionId,
+    cwd: root,
+    tool_name: "Edit",
+    tool_input: { file_path: join(root, "src", "billing", "contract.ts") },
+  });
+  const preEdit = JSON.parse(preEditRaw);
+  if (!(preEdit.hookSpecificOutput?.additionalContext ?? "").includes("src/billing/**")) {
+    throw new Error("Claude pre-edit hook did not surface the advisory lease");
+  }
   run(["release", lease.id, "--session", claude.id], root, claudeEnvironment);
 
   const status = runJson(["status", "--json"]);
   if (status.status?.sessions?.active < 2) throw new Error("Daemon status lost an active acceptance session");
   run(["session", "end", "--id", claude.id], root, claudeEnvironment);
   run(["session", "end", "--id", codex.id], root, codexEnvironment);
+  runHook({ hook_event_name: "SessionEnd", session_id: hookProviderSessionId, cwd: root, reason: "other" });
   const endedPresence = runJson(["who", "--repo", claude.repositoryIdentity, "--include-idle", "--json"]);
-  if (endedPresence.some((candidate) => candidate.id === claude.id || candidate.id === codex.id)) {
+  if (endedPresence.some((candidate) => candidate.id === claude.id || candidate.id === codex.id || candidate.id === hookSession.id)) {
     throw new Error("Ended sessions remained discoverable");
   }
-  process.stdout.write("Pinboard local acceptance passed: presence, idempotent messaging, reply, history, leases, and end signals.\n");
+  process.stdout.write("Pinboard local acceptance passed: presence, idempotent messaging, reply, history, Claude safe-point delivery, pre-edit leases, and end signals.\n");
 } finally {
   try {
     run(["daemon", "stop"]);

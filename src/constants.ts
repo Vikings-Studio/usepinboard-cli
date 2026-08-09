@@ -7,6 +7,7 @@ export const MAX_MESSAGE_BYTES = 32 * 1024;
 export const MAX_TASK_LABEL_BYTES = 512;
 export const MAX_LEASE_NOTE_BYTES = 2048;
 export const MAX_REQUEST_BYTES = 64 * 1024;
+export const MAX_HOOK_BYTES = 8 * 1024 * 1024;
 
 export const ERROR_CODES = {
   invalidInput: "INVALID_INPUT",

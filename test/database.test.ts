@@ -45,6 +45,8 @@ describe("local database", () => {
 
     const sent = database.sendMessage({ senderSessionId: codex.id, to: claude.address, body: "Are you changing the API?" });
     expect(sent.message.recipientSessionId).toBe(claude.id);
+    expect(database.inbox({ sessionId: claude.id, queuedOnly: true })).toHaveLength(1);
+    expect(database.inbox({ sessionId: claude.id, queuedOnly: true })).toHaveLength(0);
     expect(database.inbox({ sessionId: claude.id, unreadOnly: true })).toHaveLength(1);
 
     const lease = database.createLease({ sessionId: claude.id, paths: ["src/billing/**"], ttlMinutes: 30, note: "migration" });

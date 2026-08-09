@@ -11,6 +11,7 @@ import { heartbeatSchema, leaseSchema, sendMessageSchema, sessionSchema } from "
 import { PROTOCOL_VERSION_HEADER, checkProtocolCompatibility } from "../protocol/version.js";
 import { readOrCreateLocalSecret, verifyBearer } from "../security/local-auth.js";
 import {
+  deriveSessionCapability,
   generateSessionCapability,
   hashSessionCapability,
   SESSION_CAPABILITY_HEADER,
@@ -151,7 +152,9 @@ export async function startDaemon(options: {
       }
       if (method === "POST" && url.pathname === "/v1/sessions") {
         const input = sessionSchema.parse(await readJson(request));
-        const capability = generateSessionCapability();
+        const capability = input.providerSessionId
+          ? deriveSessionCapability(secret, input.id)
+          : generateSessionCapability();
         json(
           response,
           201,
@@ -226,6 +229,7 @@ export async function startDaemon(options: {
           database.inbox({
             sessionId,
             unreadOnly: url.searchParams.get("unreadOnly") === "true",
+            queuedOnly: url.searchParams.get("queuedOnly") === "true",
             limit: Number(url.searchParams.get("limit") ?? 20),
           }),
         );

@@ -14,7 +14,13 @@ The daemon is the only stateful process and SQLite writer. CLI, MCP, and hook pr
 
 macOS and Linux use a Unix socket. Windows uses a named pipe. A random 256-bit bearer secret stored in a user-only runtime directory authenticates every request. Socket permissions are restricted where supported.
 
-Each registered provider session also receives a 256-bit capability. The daemon stores only its hash and requires it for operations performed as that session. The daemon secret protects the IPC endpoint; the session capability limits accidental identity confusion between connected providers.
+Each registered provider session also receives a 256-bit capability. The daemon stores only its hash and requires it for operations performed as that session. Long-lived MCP processes receive random capabilities. Repeated short-lived hook events derive a stable capability using HMAC-SHA-256 over the local secret and session ID, preventing concurrent hook processes from invalidating one another without persisting raw authority. The daemon secret protects the IPC endpoint; the session capability limits accidental identity confusion between connected providers.
+
+## Provider and service lifecycle
+
+Codex presence follows the supported MCP process lifecycle. Claude Code additionally uses user-scoped command hooks for lifecycle activity, safe-point inbox delivery, and advisory pre-edit lease context. Hook failures are fail-open and wake/resume is never inferred.
+
+On macOS, `pinboard init` installs a per-user launchd agent. On Linux it installs a systemd user service. Definitions invoke absolute Node and packaged CLI paths without a shell, carry no inherited secrets, and are replaced or removed only when the Pinboard ownership marker is present. Windows uses the authenticated detached daemon path and remains beta.
 
 ## Persistence
 

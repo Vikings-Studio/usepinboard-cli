@@ -15,6 +15,9 @@ export async function temporaryPaths(): Promise<PinboardPaths> {
     lock: join(runtimeDir, "pinboardd.lock"),
     pid: join(runtimeDir, "pinboardd.pid"),
     log: join(runtimeDir, "pinboardd.log"),
+    config: join(dataDir, "config.json"),
+    backups: join(dataDir, "backups"),
+    marker: join(dataDir, ".pinboard-data"),
     socket: platform() === "win32" ? `\\\\.\\pipe\\pinboard-test-${randomUUID()}` : join(dataDir, "daemon.sock"),
   };
 }

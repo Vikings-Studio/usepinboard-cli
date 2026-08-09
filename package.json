@@ -22,7 +22,8 @@
     "test:acceptance": "npm run build && node scripts/acceptance-local.mjs",
     "test:watch": "vitest",
     "check": "npm run typecheck && npm run lint && npm test && npm run build",
-    "pack:check": "npm pack --dry-run"
+    "pack:check": "npm pack --dry-run",
+    "pack:verify": "node scripts/verify-package.mjs"
   },
   "engines": {
     "node": ">=24.15.0"

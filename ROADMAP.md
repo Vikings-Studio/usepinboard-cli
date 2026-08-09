@@ -8,7 +8,9 @@ The roadmap is ordered by evidence, not feature count.
 - [x] Local daemon, SQLite schema, authenticated IPC, presence, messaging, leases, and MCP tools.
 - [ ] Clean-profile Claude Code integration tests.
 - [ ] Clean-profile Codex integration tests and version-gated hook probes.
-- [ ] Idempotent, reversible provider installers.
+- [x] Idempotent, reversible provider installers.
+- [x] launchd and systemd user-service implementation with ownership guards.
+- [ ] Automated packed macOS launchd lifecycle canary (manual local canary passed on 2026-08-09).
 - [ ] macOS and Linux package canaries.
 - [ ] Useful-handoff instrumentation with explicit opt-in.
 

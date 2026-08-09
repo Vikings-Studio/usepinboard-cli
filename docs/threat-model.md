@@ -20,7 +20,7 @@
 ## Current controls
 
 - Permissioned IPC plus a random bearer secret.
-- Hashed per-session capabilities for identity-bearing operations.
+- Hashed per-session capabilities for identity-bearing operations; provider hooks derive stable capabilities through HMAC without persisting raw authority.
 - Request and field size limits.
 - SQLite foreign keys and constrained state values.
 - Per-render random boundaries for untrusted text.
@@ -28,6 +28,9 @@
 - No shell interpolation for Git repository detection.
 - No cloud connection or telemetry in the current foundation.
 - No silent provider configuration edits; `init --configure` is explicit opt-in.
+- Claude settings mutations preserve unrelated values, reject symlinks and malformed JSON, back up before writes, and remove only enumerated Pinboard handlers.
+- User-service definitions contain fixed absolute arguments, no shell interpolation or inherited secrets, restrictive umasks, ownership markers, and rollback on manager failure.
+- Provider hooks fail open so a Pinboard outage cannot block the coding session.
 
 ## Explicit non-claims
 

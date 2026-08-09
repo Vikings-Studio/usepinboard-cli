@@ -6,7 +6,7 @@
 Pinboard is a local-first communication layer for coding agents. It gives Claude Code, Codex, and future providers a shared view of active sessions, targeted messages, local inboxes, and advisory file leases without requiring a new launcher.
 
 > [!WARNING]
-> This repository is pre-alpha. The local Personal foundation is under active development. Teams relay, cloud sync, WorkOS organizations, billing, wake/resume, and automatic provider hook installation are not implemented here yet.
+> This repository is pre-alpha. The offline Personal runtime and reversible local integrations are implemented, but the package is not published. Teams relay, cloud sync, WorkOS organizations, billing, and provider wake/resume are not implemented here yet.
 
 ## What works
 
@@ -18,6 +18,9 @@ Pinboard is a local-first communication layer for coding agents. It gives Claude
 - Versioned local JSON export and guarded local-data purge.
 - MCP tools: `who`, `send`, `inbox`, `mark_read`, `threads`, `reserve`, `release`, and `status`.
 - CLI commands for initialization, diagnostics, daemon lifecycle, presence, messages, and leases.
+- Idempotent MCP configuration for Claude Code and Codex, plus reversible Claude lifecycle, safe-point inbox, and advisory pre-edit hooks.
+- Native per-user daemon definitions for launchd and systemd. Windows remains a documented best-effort manual-daemon beta.
+- Versioned local configuration, package update handoff, and an uninstall flow that preserves data by default.
 - Safe rendering of agent-provided strings as attributed, untrusted data.
 - Deterministic repository and branch detection through Git.
 
@@ -42,10 +45,9 @@ npm pack
 npm install -g ./usepinboard-cli-*.tgz
 ```
 
-Then initialize Pinboard:
+Then initialize Pinboard and explicitly reconcile every detected provider:
 
 ```bash
-pinboard init
 pinboard init --configure
 pinboard doctor
 pinboard status
@@ -72,7 +74,9 @@ Codex supports MCP launcher management:
 codex mcp add pinboard -- pinboard mcp --provider codex
 ```
 
-Provider configuration changes are deliberately not performed silently. `pinboard init` prints the detected capability and exact next step. `pinboard init --configure` explicitly invokes each detected provider's MCP configuration command without shell interpolation.
+Provider configuration changes are deliberately not performed silently. `pinboard init` prints the detected capability and exact next step. `pinboard init --configure` explicitly invokes each detected provider's MCP configuration command without shell interpolation and installs only documented Claude Code hooks. It creates a restrictive backup before changing Claude's user settings and preserves unrelated keys and hooks.
+
+Claude Code receives queued messages at supported safe points (`UserPromptSubmit`, `PostToolUse`, and `Stop`) and sees advisory lease context before supported edit tools. A queued message is claimed once for automatic hook delivery and remains available through MCP until explicitly marked read. Codex uses its MCP process lifecycle for presence and must pull the inbox through MCP. Pinboard does not claim or emulate wake/resume on either provider.
 
 ## CLI overview
 
@@ -81,6 +85,8 @@ pinboard init [--dry-run] [--configure]
 pinboard doctor [--json]
 pinboard status [--json]
 pinboard daemon start|stop|restart|status|run
+pinboard service install|uninstall|start|stop|restart|status
+pinboard integrations list|install|remove|doctor
 pinboard session end --id <session-id>
 pinboard who [--repo <identity>] [--branch <branch>]
 pinboard send <address> <message>
@@ -89,9 +95,12 @@ pinboard threads [--session <id>] [--limit <n>]
 pinboard reserve <glob...> --session <id> --ttl <minutes> [--note <text>]
 pinboard release <lease-id> --session <id>
 pinboard mcp --provider <provider>
-pinboard hook <event> --provider <provider>
+pinboard hook <provider>
+pinboard config get|set|path
 pinboard export [--output <new-file>]
 pinboard purge --confirm delete-local-data
+pinboard update [--dry-run]
+pinboard uninstall [--purge-data --confirm delete-local-data]
 ```
 
 ## Privacy and security
@@ -99,6 +108,8 @@ pinboard purge --confirm delete-local-data
 Personal data stays on the machine. The daemon does not contact Pinboard Cloud and telemetry is absent in this pre-alpha foundation. It binds to a permissioned local IPC endpoint and requires a random local bearer secret.
 
 Identity-bearing agent operations additionally require a per-session capability whose hash is stored in SQLite and omitted from exports. MCP integrations manage this capability internally; low-level session-scoped CLI commands accept it through `PINBOARD_SESSION_CAPABILITY` for diagnostics and automation.
+
+Short-lived provider hooks use a stable HMAC-derived capability bound to the local secret and session ID. This prevents concurrent lifecycle events from rotating one another's authority while keeping the capability out of settings files, logs, and exports.
 
 All strings originating in another agent—messages, lease notes, and task labels—must be treated as untrusted data. Pinboard wraps them with attributed, per-render boundaries and does not execute them or promote them to system instructions. See [the threat model](docs/threat-model.md) and [security policy](SECURITY.md).
 
@@ -111,6 +122,7 @@ npm run lint
 npm test
 npm run build
 npm run pack:check
+npm run pack:verify
 npm run test:acceptance
 ```
 
@@ -123,6 +135,16 @@ PINBOARD_HOME=/tmp/pinboard-dev npm run dev -- init
 ## Roadmap
 
 See [ROADMAP.md](ROADMAP.md). The product is intentionally communication infrastructure, not an agent scheduler, task allocator, issue tracker, or fleet launcher.
+
+## Removing Pinboard
+
+`pinboard uninstall` removes only Pinboard-owned MCP entries, Claude hook handlers, and the user service. Local data remains in place. Permanent deletion requires:
+
+```bash
+pinboard uninstall --purge-data --confirm delete-local-data
+```
+
+The CLI cannot safely remove its own globally installed package while running; finish with `npm uninstall -g @usepinboard/cli`.
 
 ## Contributing
 

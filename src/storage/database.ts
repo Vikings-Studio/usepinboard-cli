@@ -1,12 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import {
-  DEFAULT_IDLE_MINUTES,
-  DEFAULT_STALE_MINUTES,
   MAX_LEASE_NOTE_BYTES,
   MAX_MESSAGE_BYTES,
   MAX_TASK_LABEL_BYTES,
 } from "../constants.js";
+import { readConfig, type PinboardConfig } from "../config/settings.js";
 import { makeAddress } from "../domain/repository.js";
 import type {
   DaemonStatus,
@@ -59,10 +58,12 @@ function byteLength(value: string): number {
 export class PinboardDatabase {
   readonly paths: PinboardPaths;
   readonly database: DatabaseSync;
+  readonly config: PinboardConfig;
 
-  private constructor(paths: PinboardPaths, database: DatabaseSync) {
+  private constructor(paths: PinboardPaths, database: DatabaseSync, config: PinboardConfig) {
     this.paths = paths;
     this.database = database;
+    this.config = config;
   }
 
   static async open(paths: PinboardPaths = getPaths()): Promise<PinboardDatabase> {
@@ -96,7 +97,8 @@ export class PinboardDatabase {
         throw error;
       }
     }
-    return new PinboardDatabase(paths, database);
+    const config = await readConfig(paths);
+    return new PinboardDatabase(paths, database, config);
   }
 
   close(): void {
@@ -234,8 +236,8 @@ export class PinboardDatabase {
   }
 
   refreshPresenceStates(now = Date.now()): void {
-    const idleCutoff = now - DEFAULT_IDLE_MINUTES * 60_000;
-    const staleCutoff = now - DEFAULT_STALE_MINUTES * 60_000;
+    const idleCutoff = now - this.config.idleMinutes * 60_000;
+    const staleCutoff = now - this.config.staleMinutes * 60_000;
     this.database
       .prepare("UPDATE sessions SET state = 'idle' WHERE state = 'active' AND last_active_at < ?")
       .run(idleCutoff);
@@ -342,11 +344,12 @@ export class PinboardDatabase {
     return { message: this.getMessage(id), alternatives: matches.slice(1) };
   }
 
-  inbox(input: { sessionId: string; unreadOnly?: boolean; limit?: number }): MessageRecord[] {
+  inbox(input: { sessionId: string; unreadOnly?: boolean; queuedOnly?: boolean; limit?: number }): MessageRecord[] {
     const limit = Math.min(Math.max(input.limit ?? 20, 1), 100);
     const conditions = ["recipient_session_id = ?"];
     const values: Array<string | number> = [input.sessionId];
     if (input.unreadOnly) conditions.push("status != 'read'");
+    if (input.queuedOnly) conditions.push("status = 'queued'");
     const rows = this.all(
       this.database.prepare(
         `SELECT * FROM messages WHERE ${conditions.join(" AND ")}

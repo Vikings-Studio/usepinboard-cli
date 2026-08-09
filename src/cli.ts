@@ -1,5 +1,7 @@
 #!/usr/bin/env node
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, readFile, rm, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { setTimeout as delay } from "node:timers/promises";
 import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
 import { Command } from "commander";
@@ -9,12 +11,24 @@ import { daemonIsHealthy, startBackgroundDaemon, stopBackgroundDaemon } from "./
 import { startDaemon } from "./daemon/server.js";
 import { detectRepository } from "./domain/repository.js";
 import type { DaemonStatus, LeaseRecord, LocalExportSnapshot, MessageRecord, Provider, SessionRecord, SessionRegistration, ThreadRecord } from "./domain/types.js";
-import { configureProviderMcp, detectProviders } from "./integrations/detect.js";
+import { configureProviderMcp, detectProviders, removeProviderMcp, type ProviderId } from "./integrations/detect.js";
+import { installClaudeHooks, removeClaudeHooks } from "./integrations/claude-hooks.js";
 import { handleProviderHook } from "./integrations/hook.js";
 import { runMcpServer } from "./mcp/server.js";
 import { ensureDirectories, getPaths, validatePurgeTarget } from "./platform/paths.js";
+import {
+  installUserService,
+  removeUserService,
+  restoreUserServiceManagerState,
+  serviceDefinition,
+  startUserService,
+  stopUserService,
+  userServiceStatus,
+} from "./platform/service.js";
+import { parseConfigKey, readConfig, setConfig } from "./config/settings.js";
+import { runtimeSupported } from "./platform/runtime.js";
 import { readOrCreateLocalSecret } from "./security/local-auth.js";
-import { formatUntrusted } from "./security/untrusted.js";
+import { formatUntrusted, sanitizeUntrustedText, truncateUtf8 } from "./security/untrusted.js";
 import { heading, line, printJson, success, warning } from "./cli/output.js";
 
 const require = createRequire(import.meta.url);
@@ -32,6 +46,11 @@ function provider(value: string): Provider {
   throw new Error(`Unsupported provider: ${value}`);
 }
 
+function integrationProvider(value: string): ProviderId {
+  if (value === "claude-code" || value === "codex") return value;
+  throw new Error(`Unsupported integration provider: ${value}`);
+}
+
 function sessionCapability(): string {
   const capability = process.env.PINBOARD_SESSION_CAPABILITY?.trim();
   if (!capability) {
@@ -40,12 +59,136 @@ function sessionCapability(): string {
   return capability;
 }
 
+function currentServiceDefinition() {
+  const paths = getPaths();
+  return serviceDefinition({
+    nodeExecutable: process.execPath,
+    cliExecutable: process.argv[1] ?? "",
+    logPath: paths.log,
+    ...(process.env.PINBOARD_HOME ? { pinboardHome: process.env.PINBOARD_HOME } : {}),
+  });
+}
+
+async function configureIntegration(id: ProviderId, dryRun = false): Promise<void> {
+  const providers = detectProviders();
+  const detected = providers.find((item) => item.id === id);
+  if (!detected?.installed) throw new Error(`${id} is not installed`);
+  if (dryRun) {
+    printJson({
+      provider: id,
+      mcp: detected.mcpVerified
+        ? "unchanged"
+        : detected.mcpConfigured
+          ? detected.mcpOwned ? `reconcile Pinboard-owned entry with: ${detected.mcpCommand}` : "blocked: preserve conflicting named entry"
+          : detected.mcpCommand,
+      hooks: id === "claude-code"
+        ? detected.hookSupport === "blocked-by-policy"
+          ? "blocked by enterprise managed settings; MCP lifecycle only"
+          : { path: `${process.env.HOME ?? "~"}/.claude/settings.json`, events: ["SessionStart", "UserPromptSubmit", "PostToolUse", "PreToolUse", "Stop", "SessionEnd"] }
+        : "unsupported; MCP lifecycle only",
+    });
+    return;
+  }
+  const hadMcp = detected.mcpConfigured;
+  configureProviderMcp(id);
+  try {
+    if (id === "claude-code" && detected.hookSupport !== "blocked-by-policy") {
+      const result = await installClaudeHooks({ paths: getPaths() });
+      success(result.changed ? `Installed Claude Code hooks in ${result.path}` : "Claude Code hooks already current");
+      if (result.backup) line(`  Backup: ${result.backup}`);
+    } else if (id === "claude-code") {
+      warning("Claude user hooks are blocked by enterprise policy; configured MCP lifecycle only. Safe-point delivery and pre-edit lease context remain unavailable.");
+    }
+  } catch (error) {
+    if (!hadMcp) removeProviderMcp(id, true);
+    throw error;
+  }
+  success(`Configured ${id}`);
+}
+
+async function removeIntegration(id: ProviderId): Promise<void> {
+  if (id === "claude-code") {
+    const result = await removeClaudeHooks({ paths: getPaths() });
+    if (result.changed) success(`Removed Pinboard-owned Claude hooks from ${result.path}`);
+  }
+  const mcp = removeProviderMcp(id);
+  if (mcp === "preserved") warning(`Preserved non-Pinboard MCP entry named pinboard in ${id}`);
+  else success(`Removed Pinboard-owned ${id} integration`);
+}
+
 async function ensureStarted(): Promise<DaemonClient> {
   const paths = getPaths();
   if (!(await daemonIsHealthy(paths))) {
     await startBackgroundDaemon({ executable: process.argv[1] ?? "pinboard", paths });
   }
   return new DaemonClient(paths);
+}
+
+async function waitForDaemonHealthy(paths = getPaths(), attempts = 50): Promise<void> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (await daemonIsHealthy(paths)) return;
+    await delay(100);
+  }
+  throw new Error(`Pinboard user service started but the daemon did not become healthy. See ${paths.log}`);
+}
+
+async function undoServiceInstallAfterHealthFailure(
+  definition: ReturnType<typeof currentServiceDefinition>,
+  installation: Awaited<ReturnType<typeof installUserService>> | null,
+): Promise<void> {
+  if (installation?.created) await removeUserService(definition);
+  else if (installation?.changed && installation.previousContent) {
+    await installUserService({ ...definition, content: installation.previousContent });
+  }
+  if (installation && !installation.created) restoreUserServiceManagerState(definition, installation.previousState);
+}
+
+async function recordHookFailure(error: unknown): Promise<void> {
+  try {
+    const paths = getPaths();
+    await ensureDirectories(paths);
+    const message = truncateUtf8(sanitizeUntrustedText(error instanceof Error ? error.message : String(error)), 2048);
+    await appendFile(paths.log, `${new Date().toISOString()} [hook-failure] ${message}\n`, { encoding: "utf8", mode: 0o600 });
+  } catch {
+    // Hook failures must remain non-blocking even when diagnostics cannot be written.
+  }
+}
+
+async function recentHookFailure(path: string): Promise<string | null> {
+  try {
+    const lines = (await readFile(path, "utf8")).split("\n").filter((entry) => entry.includes("[hook-failure]"));
+    return lines.at(-1) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function exportLocalData(output?: string): Promise<void> {
+  const client = await ensureStarted();
+  const snapshot = await client.get<LocalExportSnapshot>("/v1/export");
+  const serialized = `${JSON.stringify(snapshot, null, 2)}\n`;
+  if (output) {
+    await writeFile(output, serialized, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    success(`Local data exported to ${output}`);
+  } else {
+    process.stdout.write(serialized);
+  }
+}
+
+async function purgeLocalData(confirm: string): Promise<void> {
+  if (confirm !== "delete-local-data") {
+    throw new Error("Refusing to purge. Pass --confirm delete-local-data after exporting anything you need.");
+  }
+  const paths = getPaths();
+  const target = await validatePurgeTarget(paths.dataDir);
+  const definition = currentServiceDefinition();
+  if (userServiceStatus(definition).installed) await removeUserService(definition);
+  await stopBackgroundDaemon(paths);
+  if (await daemonIsHealthy(paths)) {
+    throw new Error(`Refusing to purge while the Pinboard daemon is still running. Stop it and retry; data remains at ${target}.`);
+  }
+  await rm(target, { recursive: true, force: true });
+  success(`Deleted local Pinboard data at ${target}. This cannot be recovered without an export.`);
 }
 
 function printPresence(sessions: SessionRecord[]): void {
@@ -75,13 +218,45 @@ program
         writes: [paths.dataDir, paths.database, paths.secret, paths.pid, paths.log],
         socket: paths.socket,
         providers,
-        providerConfiguration: options.configure ? "would configure detected providers" : "unchanged",
+        providerConfiguration: options.configure
+          ? providers.filter((item) => item.installed).map((item) => ({
+            provider: item.id,
+            mcp: item.mcpVerified ? "unchanged" : item.mcpConfigured ? item.mcpOwned ? "reconcile Pinboard-owned entry" : "blocked by conflicting named entry" : "add",
+            hooks: item.id === "claude-code" ? item.hookSupport : "MCP lifecycle only",
+          }))
+          : "unchanged",
+        service: currentServiceDefinition(),
       });
       return;
     }
     await ensureDirectories(paths);
     await readOrCreateLocalSecret(paths);
-    const pid = await startBackgroundDaemon({ executable: process.argv[1] ?? "pinboard", paths });
+    const definition = currentServiceDefinition();
+    let pid = 0;
+    if (definition.supported && (process.argv[1] ?? "").endsWith(".js")) {
+      await stopBackgroundDaemon(paths).catch(() => false);
+      let serviceInstall: Awaited<ReturnType<typeof installUserService>> | null = null;
+      try {
+        const installed = await installUserService(definition);
+        serviceInstall = installed;
+        await waitForDaemonHealthy(paths);
+        success(`${definition.platform === "darwin" ? "launchd" : "systemd"} user service ${installed.changed ? "installed" : "already current"}`);
+      } catch (error) {
+        try {
+          await undoServiceInstallAfterHealthFailure(definition, serviceInstall);
+        } catch (rollbackError) {
+          throw new Error(`${error instanceof Error ? error.message : String(error)}\nCould not restore the previous user service: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
+        }
+        warning(`Native user service unavailable: ${error instanceof Error ? error.message : String(error)}`);
+        pid = await startBackgroundDaemon({ executable: process.argv[1] ?? "pinboard", paths });
+        warning("Started the authenticated detached daemon fallback; it will not restart automatically after logout or reboot");
+      }
+    } else {
+      pid = await startBackgroundDaemon({ executable: process.argv[1] ?? "pinboard", paths });
+      warning(definition.supported
+        ? "Source-mode execution cannot install a durable service; started a detached daemon"
+        : "Native service installation is unavailable on this platform; started a detached daemon (Windows is beta)");
+    }
     heading("Pinboard is ready locally");
     success(`Daemon running${pid ? ` (PID ${pid})` : ""}`);
     success(`Data directory: ${paths.dataDir}`);
@@ -91,8 +266,7 @@ program
       if (item.installed) {
         success(`${item.id}: ${item.version ?? "detected"}`);
         if (options.configure) {
-          configureProviderMcp(item.id);
-          success(`  Registered MCP server in ${item.id}`);
+          await configureIntegration(item.id);
         } else {
           line(`  ${item.mcpCommand}`);
         }
@@ -112,12 +286,14 @@ program
   .option("--json", "print machine-readable output")
   .action(async (options: { json?: boolean }) => {
     const paths = getPaths();
-    const node = { version: process.version, supported: Number(process.versions.node.split(".")[0]) >= 24 };
+    const node = { version: process.version, supported: runtimeSupported() };
     const healthy = await daemonIsHealthy(paths);
     const report = {
       node,
       daemon: { healthy, socket: paths.socket, dataDir: paths.dataDir },
       providers: detectProviders(),
+      service: userServiceStatus(currentServiceDefinition()),
+      hooks: { recentFailure: await recentHookFailure(paths.log) },
       privacy: { telemetry: false, cloudConnected: false },
     };
     if (options.json) printJson(report);
@@ -128,9 +304,15 @@ program
       for (const item of report.providers) {
         (item.installed ? success : warning)(`${item.id}: ${item.version ?? "not detected"}`);
         if (item.installed) {
-          (item.mcpConfigured ? success : warning)(`  MCP: ${item.mcpConfigured ? "configured" : "not configured"}`);
-          line(`  Hooks: ${item.hookSupport}; verify on the exact provider version before enabling injection.`);
+          (item.mcpVerified ? success : warning)(`  MCP: ${item.mcpVerified ? "verified" : item.mcpConfigured ? "named entry differs" : "not configured"}`);
+          line(`  Presence: ${item.capabilities.presence}`);
+          line(`  Safe-point delivery: ${item.capabilities.safePointDelivery ? "configured" : "unavailable"}`);
+          if (item.capabilities.safePointDelivery) line("  Exact-version hook runtime: canary required");
+          line("  Wake/resume: unsupported");
         }
+      }
+      if (report.hooks.recentFailure) {
+        warning(`Recent provider hook failure (historical until the next successful canary): ${report.hooks.recentFailure}`);
       }
     }
     if (!node.supported || !healthy) process.exitCode = 1;
@@ -158,20 +340,53 @@ program
 
 const daemon = program.command("daemon").description("Manage the local daemon");
 daemon.command("start").action(async () => {
-  const pid = await startBackgroundDaemon({ executable: process.argv[1] ?? "pinboard" });
-  success(`Daemon running${pid ? ` (PID ${pid})` : ""}`);
+  const definition = currentServiceDefinition();
+  const serviceStatus = userServiceStatus(definition);
+  if (serviceStatus.installed) {
+    startUserService(definition);
+    success(`Daemon running through ${serviceStatus.manager}`);
+  } else {
+    const pid = await startBackgroundDaemon({ executable: process.argv[1] ?? "pinboard" });
+    success(`Daemon running${pid ? ` (PID ${pid})` : ""}`);
+  }
 });
 daemon.command("stop").action(async () => {
-  const stopped = await stopBackgroundDaemon();
-  (stopped ? success : warning)(stopped ? "Daemon stopped" : "Daemon was not running or did not stop cleanly");
+  const definition = currentServiceDefinition();
+  const serviceStatus = userServiceStatus(definition);
+  if (serviceStatus.installed) {
+    stopUserService(definition);
+    success(`Daemon stopped through ${serviceStatus.manager}`);
+  } else {
+    const stopped = await stopBackgroundDaemon();
+    (stopped ? success : warning)(stopped ? "Daemon stopped" : "Daemon was not running or did not stop cleanly");
+  }
 });
 daemon.command("restart").action(async () => {
-  await stopBackgroundDaemon();
-  const pid = await startBackgroundDaemon({ executable: process.argv[1] ?? "pinboard" });
-  success(`Daemon restarted${pid ? ` (PID ${pid})` : ""}`);
+  const definition = currentServiceDefinition();
+  const serviceStatus = userServiceStatus(definition);
+  if (serviceStatus.installed) {
+    stopUserService(definition);
+    startUserService(definition);
+    success(`Daemon restarted through ${serviceStatus.manager}`);
+  } else {
+    await stopBackgroundDaemon();
+    const pid = await startBackgroundDaemon({ executable: process.argv[1] ?? "pinboard" });
+    success(`Daemon restarted${pid ? ` (PID ${pid})` : ""}`);
+  }
 });
 daemon.command("status").action(async () => {
-  line((await daemonIsHealthy()) ? "running" : "stopped");
+  const status = userServiceStatus(currentServiceDefinition());
+  line(`${(await daemonIsHealthy()) ? "running" : "stopped"}${status.installed ? ` via ${status.manager}` : " manually"}`);
+});
+daemon.command("logs").action(async () => {
+  const paths = getPaths();
+  heading(paths.log);
+  try {
+    const contents = await readFile(paths.log, "utf8");
+    line(contents.split("\n").slice(-100).join("\n"));
+  } catch {
+    warning("No daemon log exists yet");
+  }
 });
 daemon
   .command("run", { hidden: true })
@@ -182,6 +397,105 @@ daemon
     process.once("SIGTERM", shutdown);
     await new Promise(() => undefined);
   });
+
+const service = program.command("service").description("Manage the platform user service");
+service.command("install").option("--dry-run").action(async (options: { dryRun?: boolean }) => {
+  const definition = currentServiceDefinition();
+  if (options.dryRun) {
+    printJson(definition);
+    return;
+  }
+  await ensureDirectories(getPaths());
+  let serviceInstall: Awaited<ReturnType<typeof installUserService>> | null = null;
+  try {
+    const result = await installUserService(definition);
+    serviceInstall = result;
+    await waitForDaemonHealthy(getPaths());
+    success(`User service ${result.changed ? "installed" : "already current"}: ${result.path}`);
+  } catch (error) {
+    try {
+      await undoServiceInstallAfterHealthFailure(definition, serviceInstall);
+    } catch (rollbackError) {
+      throw new Error(`${error instanceof Error ? error.message : String(error)}\nCould not restore the previous user service: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
+    }
+    throw error;
+  }
+});
+service.command("uninstall").action(async () => {
+  const removed = await removeUserService(currentServiceDefinition());
+  (removed ? success : warning)(removed ? "Pinboard user service removed" : "No Pinboard-owned user service found");
+});
+service.command("start").action(() => {
+  startUserService(currentServiceDefinition());
+  success("Pinboard user service started");
+});
+service.command("stop").action(() => {
+  stopUserService(currentServiceDefinition());
+  success("Pinboard user service stopped");
+});
+service.command("restart").action(() => {
+  const definition = currentServiceDefinition();
+  stopUserService(definition);
+  startUserService(definition);
+  success("Pinboard user service restarted");
+});
+service.command("status").option("--json").action((options: { json?: boolean }) => {
+  const status = userServiceStatus(currentServiceDefinition());
+  if (options.json) printJson(status);
+  else line(`${status.manager}: ${status.installed ? "installed" : "not installed"}, ${status.running ? "running" : "stopped"}`);
+  if (status.supported && (!status.installed || !status.running)) process.exitCode = 1;
+});
+
+const integrations = program.command("integrations").description("Manage coding-provider integrations");
+integrations.command("list").option("--json").action((options: { json?: boolean }) => {
+  const detected = detectProviders();
+  if (options.json) printJson(detected);
+  else for (const item of detected) {
+    line(`${item.id}: ${item.installed ? item.version ?? "detected" : "not installed"}; MCP ${item.mcpVerified ? "verified" : item.mcpConfigured ? "named entry differs" : "not configured"}; ${item.hookSupport}`);
+  }
+});
+integrations
+  .command("install")
+  .argument("[provider]", "claude-code or codex", integrationProvider)
+  .option("--dry-run")
+  .action(async (selected: ProviderId | undefined, options: { dryRun?: boolean }) => {
+    const ids: ProviderId[] = selected ? [selected] : detectProviders().filter((item) => item.installed).map((item) => item.id);
+    if (ids.length === 0) throw new Error("No supported provider is installed");
+    for (const id of ids) await configureIntegration(id, options.dryRun);
+  });
+integrations
+  .command("remove")
+  .argument("[provider]", "claude-code or codex", integrationProvider)
+  .action(async (selected: ProviderId | undefined) => {
+    const ids: ProviderId[] = selected ? [selected] : ["claude-code", "codex"];
+    for (const id of ids) await removeIntegration(id);
+  });
+integrations.command("doctor").option("--json").action((options: { json?: boolean }) => {
+  const detected = detectProviders();
+  const report = detected.map((item) => ({
+    ...item,
+    status: !item.installed || !item.mcpVerified || (item.id === "claude-code" && !item.capabilities.safePointDelivery)
+      ? "incomplete" as const
+      : Object.values(item.capabilityMatrix).filter((capability) => capability.configured).every((capability) => capability.runtimeVerified)
+        ? "verified" as const
+        : "configured-unverified" as const,
+  }));
+  if (options.json) printJson(report);
+  else for (const item of report) (item.status === "verified" ? success : warning)(`${item.id}: ${item.status}`);
+  if (report.some((item) => item.installed && item.status === "incomplete")) process.exitCode = 1;
+});
+
+const config = program.command("config").description("Read or update local Pinboard settings");
+config.command("path").action(() => line(getPaths().config));
+config.command("get").argument("[key]", "idleMinutes or staleMinutes", parseConfigKey).action(async (key?: ReturnType<typeof parseConfigKey>) => {
+  const current = await readConfig(getPaths());
+  if (key) line(String(current[key]));
+  else printJson(current);
+});
+config.command("set").argument("<key>", "idleMinutes or staleMinutes", parseConfigKey).argument("<value>").action(async (key: ReturnType<typeof parseConfigKey>, value: string) => {
+  const next = await setConfig(getPaths(), key, value);
+  success(`${key}=${String(next[key])}; restart Pinboard to apply the change`);
+});
 
 const session = program.command("session").description("Manage one local agent session");
 session
@@ -330,10 +644,15 @@ program
 program
   .command("hook")
   .description("Handle a provider hook event from JSON stdin")
-  .argument("<event>")
-  .requiredOption("--provider <provider>", "claude-code or codex", provider)
-  .action(async (event: string, options: { provider: Provider }) => {
-    await handleProviderHook(event, options.provider);
+  .argument("<provider>", "claude-code or codex", provider)
+  .action(async (hookProvider: Provider) => {
+    try {
+      const output = await handleProviderHook(hookProvider);
+      if (output) process.stdout.write(`${JSON.stringify(output)}\n`);
+    } catch (error) {
+      // Provider hooks fail open: Pinboard must never break a coding session.
+      await recordHookFailure(error);
+    }
   });
 
 program
@@ -372,15 +691,7 @@ program
   .description("Export all local Pinboard data as versioned JSON")
   .option("--output <path>", "write to a file instead of standard output")
   .action(async (options: { output?: string }) => {
-    const client = await ensureStarted();
-    const snapshot = await client.get<LocalExportSnapshot>("/v1/export");
-    const serialized = `${JSON.stringify(snapshot, null, 2)}\n`;
-    if (options.output) {
-      await writeFile(options.output, serialized, { encoding: "utf8", mode: 0o600, flag: "wx" });
-      success(`Local data exported to ${options.output}`);
-    } else {
-      process.stdout.write(serialized);
-    }
+    await exportLocalData(options.output);
   });
 
 program
@@ -388,17 +699,62 @@ program
   .description("Permanently delete local Pinboard state")
   .requiredOption("--confirm <phrase>", "must be exactly: delete-local-data")
   .action(async (options: { confirm: string }) => {
-    if (options.confirm !== "delete-local-data") {
-      throw new Error("Refusing to purge. Pass --confirm delete-local-data after exporting anything you need.");
-    }
-    const paths = getPaths();
-    const target = validatePurgeTarget(paths.dataDir);
-    await stopBackgroundDaemon(paths);
-    await rm(target, { recursive: true, force: true });
-    success(`Deleted local Pinboard data at ${target}. This cannot be recovered without an export.`);
+    await purgeLocalData(options.confirm);
   });
 
-program.parseAsync().catch((error: unknown) => {
+const data = program.command("data").description("Export or permanently purge local Pinboard data");
+data.command("export").option("--output <path>").action(async (options: { output?: string }) => exportLocalData(options.output));
+data.command("purge").requiredOption("--confirm <phrase>").action(async (options: { confirm: string }) => purgeLocalData(options.confirm));
+
+program
+  .command("update")
+  .description("Update the global Pinboard CLI package through npm")
+  .option("--dry-run", "print the exact package-manager command")
+  .action((options: { dryRun?: boolean }) => {
+    const command = process.platform === "win32" ? "npm.cmd" : "npm";
+    const args = ["install", "-g", "@usepinboard/cli@latest"];
+    if (options.dryRun) {
+      line(`${command} ${args.join(" ")}`);
+      return;
+    }
+    if (VERSION.includes("development")) {
+      throw new Error("The public npm package is not published yet. Use `pinboard update --dry-run` to preview the future command.");
+    }
+    const result = spawnSync(command, args, { encoding: "utf8", shell: false, stdio: "inherit" });
+    if (result.error || result.status !== 0) throw new Error(result.error?.message ?? `npm exited with status ${String(result.status)}`);
+    success("Pinboard CLI updated. Run `pinboard init --configure` to reconcile the service and provider integrations.");
+  });
+
+program
+  .command("uninstall")
+  .description("Remove Pinboard-owned services and provider integrations; preserve local data by default")
+  .option("--purge-data", "also permanently delete local Pinboard data")
+  .option("--confirm <phrase>", "required with --purge-data: delete-local-data")
+  .action(async (options: { purgeData?: boolean; confirm?: string }) => {
+    if (options.purgeData && options.confirm !== "delete-local-data") {
+      throw new Error("Refusing to purge data. Pass --purge-data --confirm delete-local-data.");
+    }
+    for (const id of ["claude-code", "codex"] as const) await removeIntegration(id);
+    await removeUserService(currentServiceDefinition());
+    await stopBackgroundDaemon().catch(() => false);
+    if (options.purgeData) {
+      const target = await validatePurgeTarget(getPaths().dataDir);
+      if (await daemonIsHealthy(getPaths())) {
+        throw new Error(`Refusing to purge while the Pinboard daemon is still running. Data remains at ${target}.`);
+      }
+      await rm(target, { recursive: true, force: true });
+      success(`Removed Pinboard and permanently deleted ${target}`);
+    } else {
+      success(`Removed Pinboard-owned integrations and service. Local data is preserved at ${getPaths().dataDir}`);
+      line("Remove the npm package separately with `npm uninstall -g @usepinboard/cli` when ready.");
+    }
+  });
+
+const execution = runtimeSupported()
+  ? program.parseAsync()
+  : Promise.reject(new Error(`Pinboard requires Node.js 24.15.0 or newer; found ${process.version}`));
+
+execution.catch((error: unknown) => {
   if (error instanceof DaemonClientError) {
     console.error(pc.red(`${error.code}: ${error.message}`));
   } else {
