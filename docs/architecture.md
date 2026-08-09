@@ -28,4 +28,4 @@ Node's built-in `node:sqlite` provides a synchronous SQLite API with WAL mode an
 
 ## Product boundary
 
-The package implements local Personal behavior only. Cloud relay, WorkOS organizations, billing, repository authorization, and cross-user policies belong to the separate Pinboard backend and must use versioned protocol contracts.
+Personal remains local and network-zero by default. The package also contains an explicitly enabled design-partner relay adapter: static credentials are stored separately from non-secret config, repository linking is opt-in, and additive SQLite inbox/outbox/cursor tables preserve local operation during relay failure. This validation adapter is not WorkOS authentication or production repository authorization. Those capabilities, billing, and cross-user policies belong to the separate Pinboard backend and must use versioned protocol contracts.

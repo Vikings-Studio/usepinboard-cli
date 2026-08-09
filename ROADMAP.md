@@ -16,6 +16,7 @@ The roadmap is ordered by evidence, not feature count.
 
 ## Teams validation spike
 
+- [x] Experimental static-token client, explicit repository links, and durable one-shot synchronization.
 - [ ] Minimal single-instance relay for design partners.
 - [ ] Cross-user presence and messaging on separate machines.
 - [ ] Measure messages sent, replied to, and acted on.

@@ -1,13 +1,15 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { access, rm, writeFile } from "node:fs/promises";
 import { request } from "node:http";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { DaemonClient } from "../src/daemon/client.js";
 import { stopBackgroundDaemon } from "../src/daemon/lifecycle.js";
 import { startDaemon } from "../src/daemon/server.js";
 import type { MessageRecord, SessionRegistration } from "../src/domain/types.js";
 import { temporaryPaths } from "./helpers.js";
 import { readLocalSecret } from "../src/security/local-auth.js";
+import { setCloudConfig } from "../src/config/settings.js";
+import { ensureDirectories } from "../src/platform/paths.js";
 
 async function exists(path: string): Promise<boolean> {
   try {
@@ -25,6 +27,54 @@ afterEach(async () => {
 });
 
 describe("daemon IPC", () => {
+  it("keeps Personal network-zero and rejects a repository link for another organization", async () => {
+    const paths = await temporaryPaths();
+    cleanup.push(paths.dataDir);
+    await ensureDirectories(paths);
+    await setCloudConfig(paths, {
+      enabled: true,
+      apiUrl: "https://relay.example.test",
+      organizationId: "org_active",
+      userId: "user_1",
+      deviceId: "device_1",
+      syncPaused: false,
+    });
+    const network = vi.spyOn(globalThis, "fetch");
+    const daemon = await startDaemon({ version: "test", paths });
+    try {
+      const client = new DaemonClient(paths);
+      await expect(client.post("/v1/cloud/repositories", {
+        organizationId: "org_other",
+        repositoryId: "repo_1",
+        repositoryIdentity: "https://github.com/example/repo",
+        repositoryName: "repo",
+      })).rejects.toMatchObject({ status: 400 });
+      const repository = { identity: "https://github.com/example/repo", name: "repo", root: "/tmp/repo", branch: "main" };
+      await client.post("/v1/cloud/repositories", {
+        organizationId: "org_active",
+        repositoryId: "repo.main:1",
+        repositoryIdentity: repository.identity,
+        repositoryName: repository.name,
+      });
+      const registration = await client.post<SessionRegistration>("/v1/sessions", { id: randomUUID(), provider: "codex", repository });
+      await expect(client.post("/v1/messages", {
+        senderSessionId: registration.session.id,
+        to: "team/user.name:dev",
+        body: "hello team",
+      }, registration.capability)).resolves.toMatchObject({ cloud: true, status: "queued" });
+      await expect(client.post("/v1/messages", {
+        senderSessionId: registration.session.id,
+        to: "team/.leading",
+        body: "invalid team",
+      }, registration.capability)).rejects.toMatchObject({ status: 400 });
+      await expect(client.get("/v1/status")).resolves.toMatchObject({ version: "test" });
+      expect(network).not.toHaveBeenCalled();
+    } finally {
+      network.mockRestore();
+      await daemon.close();
+    }
+  });
+
   it("requires local auth and completes the presence-message flow", async () => {
     const paths = await temporaryPaths();
     cleanup.push(paths.dataDir);

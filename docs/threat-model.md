@@ -26,7 +26,7 @@
 - Per-render random boundaries for untrusted text.
 - Control-character removal and boundary escape handling.
 - No shell interpolation for Git repository detection.
-- No cloud connection or telemetry in the current foundation.
+- No cloud connection or telemetry unless the experimental design-partner relay is explicitly connected. Its static token is read only from stdin, stored in a user-owned `0600` regular file, omitted from config/export/log output, and sent only to HTTPS or loopback endpoints without redirects. This file protects against accidental disclosure, not another process already running as the same OS user.
 - No silent provider configuration edits; `init --configure` is explicit opt-in.
 - Claude settings mutations preserve unrelated values, reject symlinks and malformed JSON, back up before writes, and remove only enumerated Pinboard handlers.
 - User-service definitions contain fixed absolute arguments, no shell interpolation or inherited secrets, restrictive umasks, ownership markers, and rollback on manager failure.

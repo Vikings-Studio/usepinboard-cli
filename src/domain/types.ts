@@ -105,3 +105,30 @@ export interface LocalExportSnapshot {
   leases: Record<string, unknown>[];
   settings: Record<string, unknown>[];
 }
+
+export interface CloudConnectionRecord {
+  organizationId: string;
+  apiUrl: string;
+  userId: string;
+  deviceId: string;
+  connectedAt: string;
+  updatedAt: string;
+}
+
+export interface CloudRepositoryLink {
+  id: string;
+  organizationId: string;
+  repositoryId: string;
+  repositoryIdentity: string;
+  repositoryName: string;
+  linkedAt: string;
+}
+
+export interface CloudQueueRecord {
+  id: string;
+  organizationId: string;
+  kind: string;
+  idempotencyKey: string;
+  payload: Record<string, unknown>;
+  attempts: number;
+}

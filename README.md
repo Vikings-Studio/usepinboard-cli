@@ -6,7 +6,7 @@
 Pinboard is a local-first communication layer for coding agents. It gives Claude Code, Codex, and future providers a shared view of active sessions, targeted messages, local inboxes, and advisory file leases without requiring a new launcher.
 
 > [!WARNING]
-> This repository is pre-alpha. The offline Personal runtime and reversible local integrations are implemented, but the package is not published. Teams relay, cloud sync, WorkOS organizations, billing, and provider wake/resume are not implemented here yet.
+> This repository is pre-alpha. The offline Personal runtime and reversible local integrations are implemented, but the package is not published. An explicitly connected, static-token Teams validation relay is experimental; WorkOS login, production organizations, billing, and provider wake/resume are not implemented here yet.
 
 ## What works
 
@@ -23,6 +23,7 @@ Pinboard is a local-first communication layer for coding agents. It gives Claude
 - Versioned local configuration, package update handoff, and an uninstall flow that preserves data by default.
 - Safe rendering of agent-provided strings as attributed, untrusted data.
 - Deterministic repository and branch detection through Git.
+- An opt-in design-partner relay client with durable one-shot synchronization, explicit repository links, and offline outbox/inbox state. It is not the production Teams authentication model.
 
 ## Requirements
 
@@ -87,6 +88,9 @@ pinboard status [--json]
 pinboard daemon start|stop|restart|status|run
 pinboard service install|uninstall|start|stop|restart|status
 pinboard integrations list|install|remove|doctor
+pinboard cloud connect --api <https-url>|status|disconnect
+pinboard sync now|status|pause|resume
+pinboard repo link --repository-id <allowed-id>|status|list|unlink
 pinboard session end --id <session-id>
 pinboard who [--repo <identity>] [--branch <branch>]
 pinboard send <address> <message>
@@ -103,9 +107,28 @@ pinboard update [--dry-run]
 pinboard uninstall [--purge-data --confirm delete-local-data]
 ```
 
+## Experimental Teams validation relay
+
+Personal never contacts Pinboard Cloud unless a user explicitly connects the validation relay. Static design-partner tokens are accepted only on standard input: they cannot be passed as command arguments or environment options and are never printed, exported, or included in diagnostics.
+
+The experimental connection is macOS/Linux-only. Windows Personal remains supported at its existing beta level, but cloud connection is refused until Windows Credential Manager or DPAPI protection is implemented.
+
+```bash
+your-secret-manager read pinboard-design-partner-token \
+  | pinboard cloud connect --api https://relay.example.com
+pinboard repo link --repository-id api
+pinboard sync now
+```
+
+Only HTTPS relay URLs are accepted, except loopback HTTP used by tests. Repository linking uploads the normalized Git remote, repository name, branch, provider, provider session reference, and optional deterministic task label. It never uploads the local repository root, raw prompt, file contents, or local daemon credentials.
+
+Synchronization is manual in this validation slice. Messages addressed to `team/<user-id>` are committed to the local SQLite outbox before network delivery. Inbox pages restart from the newest page on every sync and deduplicate by remote message ID, so reconnects do not skip messages. `pinboard cloud disconnect` preserves Personal data and refuses to strand pending work unless `--discard-pending` is explicit.
+
+Each session sync reads at most 20 pages of 100 pending messages. The validation relay enforces a 1,000-message recipient pending quota and excludes read, expired, and other-device claimed messages, keeping the bound reachable; exceeding it is reported as a deferred session failure while outbox and receipt flushing continues. Local data export intentionally excludes the experimental cloud cache and queue tables; disconnect or retain the marked Pinboard data directory for recovery instead.
+
 ## Privacy and security
 
-Personal data stays on the machine. The daemon does not contact Pinboard Cloud and telemetry is absent in this pre-alpha foundation. It binds to a permissioned local IPC endpoint and requires a random local bearer secret.
+Personal data stays on the machine and Personal mode performs no network requests. The daemon contacts the experimental relay only after explicit `cloud connect`; telemetry remains absent. Local IPC uses a permissioned endpoint and a random local bearer secret.
 
 Identity-bearing agent operations additionally require a per-session capability whose hash is stored in SQLite and omitted from exports. MCP integrations manage this capability internally; low-level session-scoped CLI commands accept it through `PINBOARD_SESSION_CAPABILITY` for diagnostics and automation.
 

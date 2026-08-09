@@ -2,19 +2,38 @@ import { open, readFile, rename } from "node:fs/promises";
 import { dirname } from "node:path";
 import { mkdir } from "node:fs/promises";
 import type { PinboardPaths } from "../platform/paths.js";
+import { isCloudIdentifier } from "../cloud/identifiers.js";
 
 export interface PinboardConfig {
-  version: 1;
+  version: 2;
   idleMinutes: number;
   staleMinutes: number;
+  cloud: CloudConfig;
+}
+
+export interface CloudConfig {
+  enabled: boolean;
+  apiUrl: string | null;
+  organizationId: string | null;
+  userId: string | null;
+  deviceId: string | null;
+  syncPaused: boolean;
 }
 
 export type ConfigKey = "idleMinutes" | "staleMinutes";
 
 export const DEFAULT_CONFIG: PinboardConfig = {
-  version: 1,
+  version: 2,
   idleMinutes: 5,
   staleMinutes: 30,
+  cloud: {
+    enabled: false,
+    apiUrl: null,
+    organizationId: null,
+    userId: null,
+    deviceId: null,
+    syncPaused: false,
+  },
 };
 
 function validate(value: unknown): PinboardConfig {
@@ -22,7 +41,7 @@ function validate(value: unknown): PinboardConfig {
   const input = value as Record<string, unknown>;
   const idleMinutes = Number(input.idleMinutes ?? DEFAULT_CONFIG.idleMinutes);
   const staleMinutes = Number(input.staleMinutes ?? DEFAULT_CONFIG.staleMinutes);
-  if (input.version !== undefined && input.version !== 1) {
+  if (input.version !== undefined && input.version !== 1 && input.version !== 2) {
     const version = typeof input.version === "string" || typeof input.version === "number" ? String(input.version) : "invalid value";
     throw new Error(`Unsupported Pinboard config version: ${version}`);
   }
@@ -30,7 +49,39 @@ function validate(value: unknown): PinboardConfig {
   if (!Number.isInteger(staleMinutes) || staleMinutes <= idleMinutes || staleMinutes > 10_080) {
     throw new Error("staleMinutes must be an integer greater than idleMinutes and no more than 10080");
   }
-  return { version: 1, idleMinutes, staleMinutes };
+  const rawCloud = input.version === 2 && input.cloud && typeof input.cloud === "object" && !Array.isArray(input.cloud)
+    ? input.cloud as Record<string, unknown>
+    : {};
+  const nullableString = (key: string): string | null => {
+    const item = rawCloud[key];
+    if (item === undefined || item === null) return null;
+    if (typeof item !== "string" || item.length === 0 || item.length > 2048) throw new Error(`cloud.${key} must be a non-empty string or null`);
+    return item;
+  };
+  const apiUrl = nullableString("apiUrl");
+  if (apiUrl !== null) {
+    const url = new URL(apiUrl);
+    if (url.protocol !== "https:" && !(url.protocol === "http:" && ["127.0.0.1", "localhost", "::1"].includes(url.hostname))) {
+      throw new Error("cloud.apiUrl must use HTTPS except for loopback testing");
+    }
+  }
+  for (const key of ["organizationId", "userId", "deviceId"] as const) {
+    const identifier = nullableString(key);
+    if (identifier !== null && !isCloudIdentifier(identifier)) throw new Error(`cloud.${key} must be a stable 1-128 character identifier or null`);
+  }
+  return {
+    version: 2,
+    idleMinutes,
+    staleMinutes,
+    cloud: {
+      enabled: rawCloud.enabled === true,
+      apiUrl,
+      organizationId: nullableString("organizationId"),
+      userId: nullableString("userId"),
+      deviceId: nullableString("deviceId"),
+      syncPaused: rawCloud.syncPaused === true,
+    },
+  };
 }
 
 export async function readConfig(paths: PinboardPaths): Promise<PinboardConfig> {
@@ -60,6 +111,13 @@ export async function setConfig(paths: PinboardPaths, key: ConfigKey, rawValue: 
   const current = await readConfig(paths);
   const value: unknown = Number(rawValue);
   const next = validate({ ...current, [key]: value });
+  await writeConfig(paths, next);
+  return next;
+}
+
+export async function setCloudConfig(paths: PinboardPaths, cloud: CloudConfig): Promise<PinboardConfig> {
+  const current = await readConfig(paths);
+  const next = validate({ ...current, version: 2, cloud });
   await writeConfig(paths, next);
   return next;
 }

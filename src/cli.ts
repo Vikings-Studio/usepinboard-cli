@@ -25,11 +25,13 @@ import {
   stopUserService,
   userServiceStatus,
 } from "./platform/service.js";
-import { parseConfigKey, readConfig, setConfig } from "./config/settings.js";
+import { parseConfigKey, readConfig, setCloudConfig, setConfig } from "./config/settings.js";
 import { runtimeSupported } from "./platform/runtime.js";
 import { readOrCreateLocalSecret } from "./security/local-auth.js";
 import { formatUntrusted, sanitizeUntrustedText, truncateUtf8 } from "./security/untrusted.js";
 import { heading, line, printJson, success, warning } from "./cli/output.js";
+import { readCloudCredential, removeCloudCredential, validateStaticToken, writeCloudCredential } from "./cloud/credentials.js";
+import { normalizeCloudApiUrl, SpikeClient } from "./cloud/client.js";
 
 const require = createRequire(import.meta.url);
 const packageJson = require("../package.json") as { version: string };
@@ -39,6 +41,21 @@ function numeric(value: string): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) throw new Error(`${value} is not a number`);
   return parsed;
+}
+
+async function readStaticTokenFromStdin(): Promise<string> {
+  if (process.stdin.isTTY) {
+    throw new Error("The design-partner token must be supplied on standard input, for example: `security find-generic-password ... -w | pinboard cloud connect --api https://...`");
+  }
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  for await (const chunk of process.stdin) {
+    const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+    bytes += value.length;
+    if (bytes > 8192) throw new Error("Cloud credential input is too large");
+    chunks.push(value);
+  }
+  return validateStaticToken(Buffer.concat(chunks).toString("utf8"));
 }
 
 function provider(value: string): Provider {
@@ -495,6 +512,145 @@ config.command("get").argument("[key]", "idleMinutes or staleMinutes", parseConf
 config.command("set").argument("<key>", "idleMinutes or staleMinutes", parseConfigKey).argument("<value>").action(async (key: ReturnType<typeof parseConfigKey>, value: string) => {
   const next = await setConfig(getPaths(), key, value);
   success(`${key}=${String(next[key])}; restart Pinboard to apply the change`);
+});
+
+const cloud = program.command("cloud").description("EXPERIMENTAL: connect the design-partner Teams relay");
+cloud
+  .command("connect")
+  .requiredOption("--api <url>", "design-partner relay base URL")
+  .description("EXPERIMENTAL: connect using a static token read only from stdin")
+  .action(async (options: { api: string }) => {
+    if (process.platform === "win32") throw new Error("Experimental Teams relay connection is unavailable on Windows until OS credential protection is implemented; Personal remains supported");
+    const paths = getPaths();
+    const token = await readStaticTokenFromStdin();
+    const apiUrl = normalizeCloudApiUrl(options.api);
+    const current = await readConfig(paths);
+    const previousToken = current.cloud.enabled ? await readCloudCredential(paths).catch(() => null) : null;
+    const relay = new SpikeClient(apiUrl, token);
+    const bootstrap = await relay.bootstrap();
+    const nextCloud = {
+      enabled: true,
+      apiUrl,
+      organizationId: bootstrap.organizationId,
+      userId: bootstrap.userId,
+      deviceId: bootstrap.deviceId,
+      syncPaused: false,
+    };
+    await ensureDirectories(paths);
+    const client = await ensureStarted();
+    try {
+      await writeCloudCredential(paths, token);
+      await setCloudConfig(paths, nextCloud);
+      await client.post("/v1/cloud/connection", { ...nextCloud });
+    } catch (error) {
+      await setCloudConfig(paths, current.cloud).catch(() => undefined);
+      if (previousToken) await writeCloudCredential(paths, previousToken).catch(() => undefined);
+      else await removeCloudCredential(paths).catch(() => undefined);
+      throw error;
+    }
+    warning("Experimental Teams relay connected with a design-partner token.");
+    success(`Organization ${bootstrap.organizationId}; ${bootstrap.repositoryIds.length} allowed repositories`);
+    line("Link a repository with `pinboard repo link --repository-id <id>` and run `pinboard sync now`.");
+  });
+cloud.command("status").option("--json").action(async (options: { json?: boolean }) => {
+  const client = await ensureStarted();
+  const status = await client.get<Record<string, unknown>>("/v1/cloud/status");
+  if (options.json) printJson(status);
+  else {
+    const config = status.config as Record<string, unknown> | undefined;
+    const queue = status.queue as Record<string, unknown> | undefined;
+    heading("Pinboard Teams relay (experimental)");
+    line(config?.enabled ? `Connected to ${String(config.apiUrl)} as organization ${String(config.organizationId)}` : "Not connected");
+    if (queue) {
+      const outboxDead = typeof queue.outboxDead === "number" ? queue.outboxDead : 0;
+      const receiptsDead = typeof queue.receiptsDead === "number" ? queue.receiptsDead : 0;
+      line(`Pending: ${String(queue.outboxPending)} messages, ${String(queue.receiptsPending)} receipts; inbox ${String(queue.inboxQueued)}; dead-letter ${String(outboxDead)} messages/${String(receiptsDead)} receipts`);
+    }
+  }
+});
+cloud
+  .command("disconnect")
+  .option("--discard-pending", "permanently discard unsent messages and receipts")
+  .action(async (options: { discardPending?: boolean }) => {
+    const paths = getPaths();
+    const client = await ensureStarted();
+    const status = await client.get<{ queue: { outboxPending: number; receiptsPending: number } | null }>("/v1/cloud/status");
+    if (!options.discardPending && status.queue && (status.queue.outboxPending > 0 || status.queue.receiptsPending > 0)) {
+      throw new Error("Cloud work is pending; run `pinboard sync now` or pass --discard-pending explicitly");
+    }
+    const ended = await client.post<{ ended: number; failed: number }>("/v1/cloud/end-sessions").catch(() => ({ ended: 0, failed: 1 }));
+    if (ended.failed > 0) warning(`${ended.failed} remote session cleanup request${ended.failed === 1 ? "" : "s"} failed; relay presence will remain until its server-side expiry.`);
+    await client.delete(`/v1/cloud/connection?discardPending=${String(options.discardPending === true)}`);
+    const current = await readConfig(paths);
+    await setCloudConfig(paths, { ...current.cloud, enabled: false, syncPaused: false });
+    await removeCloudCredential(paths);
+    success("Disconnected the experimental Teams relay. Personal data and local messaging were preserved.");
+  });
+
+const sync = program.command("sync").description("EXPERIMENTAL: synchronize the Teams relay once or control synchronization");
+sync.command("now").option("--json").action(async (options: { json?: boolean }) => {
+  const client = await ensureStarted();
+  const result = await client.post<Record<string, unknown>>("/v1/cloud/sync");
+  if (options.json) printJson(result);
+  else {
+    const failures = Number(result.sessionsFailed ?? 0) + Number(result.messagesFailed ?? 0) + Number(result.receiptsFailed ?? 0);
+    (failures > 0 ? warning : success)(`Sync complete: ${String(result.sessionsPushed)} active, ${String(result.sessionsEnded)} ended, ${String(result.messagesSent)} sent, ${String(result.messagesReceived)} received, ${String(result.receiptsSent)} receipts${failures ? `, ${String(failures)} deferred` : ""}`);
+  }
+});
+sync.command("status").option("--json").action(async (options: { json?: boolean }) => {
+  const client = await ensureStarted();
+  const status = await client.get<Record<string, unknown>>("/v1/cloud/status");
+  if (options.json) printJson(status);
+  else printJson({ config: status.config, queue: status.queue });
+});
+for (const paused of [true, false]) {
+  sync.command(paused ? "pause" : "resume").action(async () => {
+    const paths = getPaths();
+    const current = await readConfig(paths);
+    if (!current.cloud.enabled) throw new Error("Pinboard Cloud is not connected");
+    await setCloudConfig(paths, { ...current.cloud, syncPaused: paused });
+    success(`Cloud sync ${paused ? "paused" : "resumed"}; Personal remains fully available.`);
+  });
+}
+
+const repo = program.command("repo").description("EXPERIMENTAL: manage explicit Teams repository links");
+repo
+  .command("link")
+  .argument("[path]", "repository path", process.cwd())
+  .requiredOption("--repository-id <id>", "allowed relay repository ID")
+  .action(async (path: string, options: { repositoryId: string }) => {
+    const paths = getPaths();
+    const config = await readConfig(paths);
+    if (!config.cloud.enabled || !config.cloud.organizationId || !config.cloud.apiUrl) throw new Error("Pinboard Cloud is not connected");
+    const repository = detectRepository(path);
+    if (repository.identity.startsWith("local:")) throw new Error("A repository with a normalized Git remote is required for Teams");
+    const bootstrap = await new SpikeClient(config.cloud.apiUrl, await readCloudCredential(paths)).bootstrap();
+    if (!bootstrap.repositoryIds.includes(options.repositoryId)) throw new Error("The repository ID is not allowed by this design-partner token");
+    const client = await ensureStarted();
+    await client.post("/v1/cloud/repositories", {
+      organizationId: config.cloud.organizationId,
+      repositoryId: options.repositoryId,
+      repositoryIdentity: repository.identity,
+      repositoryName: repository.name,
+    });
+    success(`Linked ${repository.identity} to ${options.repositoryId}`);
+  });
+repo.command("list").option("--json").action(async (options: { json?: boolean }) => {
+  const links = await (await ensureStarted()).get<Array<Record<string, unknown>>>("/v1/cloud/repositories");
+  if (options.json) printJson(links);
+  else if (links.length === 0) line("No Teams repositories linked.");
+  else for (const link of links) line(`${String(link.repositoryId)}  ${String(link.repositoryIdentity)}`);
+});
+repo.command("status").argument("[path]", "repository path", process.cwd()).option("--json").action(async (path: string, options: { json?: boolean }) => {
+  const repository = detectRepository(path);
+  const links = await (await ensureStarted()).get<Array<Record<string, unknown>>>("/v1/cloud/repositories");
+  const link = links.find((item) => item.repositoryIdentity === repository.identity) ?? null;
+  if (options.json) printJson({ repository, link });
+  else line(link ? `Linked to ${String(link.repositoryId)}` : "This repository is not linked to Teams.");
+});
+repo.command("unlink").argument("<id-or-identity>").action(async (selector: string) => {
+  await (await ensureStarted()).delete(`/v1/cloud/repositories/${encodeURIComponent(selector)}`);
+  success(`Unlinked ${selector}`);
 });
 
 const session = program.command("session").description("Manage one local agent session");

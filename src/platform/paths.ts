@@ -14,6 +14,7 @@ export interface PinboardPaths {
   pid: string;
   log: string;
   config: string;
+  cloudCredentials: string;
   backups: string;
   marker: string;
   socket: string;
@@ -53,6 +54,7 @@ export function getPaths(): PinboardPaths {
     pid: join(runtimeDir, "pinboardd.pid"),
     log: join(runtimeDir, "pinboardd.log"),
     config: join(dataDir, "config.json"),
+    cloudCredentials: join(dataDir, "cloud-credentials.json"),
     backups: join(dataDir, "backups"),
     marker: join(dataDir, ".pinboard-data"),
     socket,

@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { createConnection } from "node:net";
 import { chmod, unlink, writeFile, rm } from "node:fs/promises";
 import { platform } from "node:os";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { ERROR_CODES, MAX_REQUEST_BYTES, PROTOCOL_VERSION } from "../constants.js";
 import { acquireDaemonLock } from "./lock.js";
@@ -17,6 +18,11 @@ import {
   SESSION_CAPABILITY_HEADER,
 } from "../security/session-capability.js";
 import { PinboardDatabase } from "../storage/database.js";
+import { readConfig } from "../config/settings.js";
+import { readCloudCredential } from "../cloud/credentials.js";
+import { syncCloudOnce } from "../cloud/sync.js";
+import { SpikeClient } from "../cloud/client.js";
+import { CLOUD_IDENTIFIER_PATTERN } from "../cloud/identifiers.js";
 
 export interface DaemonHandle {
   close: () => Promise<void>;
@@ -206,6 +212,23 @@ export async function startDaemon(options: {
       if (method === "POST" && url.pathname === "/v1/messages") {
         const input = sendMessageSchema.parse(await readJson(request));
         if (input.senderSessionId && !requireSessionCapability(input.senderSessionId)) return;
+        if (input.to.startsWith("team/")) {
+          if (!input.senderSessionId) throw new Error("A sender session is required for team messages");
+          const recipientUserId = input.to.slice("team/".length);
+          if (!CLOUD_IDENTIFIER_PATTERN.test(recipientUserId)) throw new Error("Team addresses must be team/<stable-user-id>");
+          const config = await readConfig(paths);
+          if (!config.cloud.enabled || !config.cloud.organizationId) throw new Error("Pinboard Cloud is not connected");
+          const queued = database.queueCloudMessage({
+            organizationId: config.cloud.organizationId,
+            senderSessionId: input.senderSessionId,
+            recipientUserId,
+            body: input.body,
+            ...(input.threadId === undefined ? {} : { threadId: input.threadId }),
+            idempotencyKey: input.idempotencyKey ?? randomUUID(),
+          });
+          json(response, 202, { cloud: true, status: "queued", message: queued });
+          return;
+        }
         json(
           response,
           201,
@@ -217,6 +240,103 @@ export async function startDaemon(options: {
             ...(input.idempotencyKey === undefined ? {} : { idempotencyKey: input.idempotencyKey }),
           }),
         );
+        return;
+      }
+      if (method === "POST" && url.pathname === "/v1/cloud/connection") {
+        const input = z.object({
+          organizationId: z.string().regex(CLOUD_IDENTIFIER_PATTERN),
+          apiUrl: z.url().max(2048),
+          userId: z.string().regex(CLOUD_IDENTIFIER_PATTERN),
+          deviceId: z.string().regex(CLOUD_IDENTIFIER_PATTERN),
+        }).parse(await readJson(request));
+        const config = await readConfig(paths);
+        if (!config.cloud.enabled || config.cloud.organizationId !== input.organizationId
+          || config.cloud.userId !== input.userId || config.cloud.deviceId !== input.deviceId
+          || config.cloud.apiUrl !== input.apiUrl) throw new Error("Cloud connection does not match the active local configuration");
+        json(response, 200, database.setCloudConnection(input));
+        return;
+      }
+      if (method === "GET" && url.pathname === "/v1/cloud/status") {
+        const config = await readConfig(paths);
+        const organizationId = config.cloud.organizationId;
+        json(response, 200, {
+          experimental: true,
+          config: config.cloud,
+          connection: organizationId ? database.getCloudConnection(organizationId) : null,
+          queue: organizationId ? database.cloudQueueStatus(organizationId) : null,
+          repositories: organizationId ? database.listCloudRepositories(organizationId) : [],
+        });
+        return;
+      }
+      if (method === "DELETE" && url.pathname === "/v1/cloud/connection") {
+        const config = await readConfig(paths);
+        const discardPending = url.searchParams.get("discardPending") === "true";
+        if (config.cloud.organizationId) {
+          const queue = database.cloudQueueStatus(config.cloud.organizationId);
+          if (!discardPending && (queue.outboxPending > 0 || queue.receiptsPending > 0)) {
+            apiError(response, 409, ERROR_CODES.conflict, "Cloud work is pending; sync first or explicitly discard it");
+            return;
+          }
+          if (discardPending) database.discardPendingCloudWork(config.cloud.organizationId);
+          database.clearCloudConnection(config.cloud.organizationId);
+        }
+        json(response, 200, { ok: true });
+        return;
+      }
+      if (method === "POST" && url.pathname === "/v1/cloud/repositories") {
+        const input = z.object({
+          organizationId: z.string().regex(CLOUD_IDENTIFIER_PATTERN),
+          repositoryId: z.string().regex(CLOUD_IDENTIFIER_PATTERN),
+          repositoryIdentity: z.string().min(1).max(2048),
+          repositoryName: z.string().min(1).max(256),
+        }).parse(await readJson(request));
+        const config = await readConfig(paths);
+        if (!config.cloud.enabled || config.cloud.organizationId !== input.organizationId) {
+          throw new Error("Repository organization does not match the active cloud connection");
+        }
+        json(response, 201, database.linkCloudRepository(input));
+        return;
+      }
+      if (method === "GET" && url.pathname === "/v1/cloud/repositories") {
+        const config = await readConfig(paths);
+        json(response, 200, config.cloud.organizationId ? database.listCloudRepositories(config.cloud.organizationId) : []);
+        return;
+      }
+      if (method === "DELETE" && /^\/v1\/cloud\/repositories\/[^/]+$/u.test(url.pathname)) {
+        const config = await readConfig(paths);
+        const selector = segment(url.pathname, 3);
+        if (!config.cloud.organizationId || !selector) throw new Error("Pinboard Cloud is not connected");
+        const removed = database.unlinkCloudRepository(config.cloud.organizationId, decodeURIComponent(selector));
+        if (!removed) {
+          apiError(response, 404, ERROR_CODES.notFound, "Cloud repository link was not found");
+          return;
+        }
+        json(response, 200, { ok: true });
+        return;
+      }
+      if (method === "POST" && url.pathname === "/v1/cloud/sync") {
+        const config = await readConfig(paths);
+        const token = await readCloudCredential(paths);
+        json(response, 200, await syncCloudOnce({ database, config, token }));
+        return;
+      }
+      if (method === "POST" && url.pathname === "/v1/cloud/end-sessions") {
+        const config = await readConfig(paths);
+        if (!config.cloud.enabled || !config.cloud.apiUrl || !config.cloud.organizationId) throw new Error("Pinboard Cloud is not connected");
+        const relay = new SpikeClient(config.cloud.apiUrl, await readCloudCredential(paths));
+        let ended = 0;
+        let failed = 0;
+        for (const session of database.listCloudSessionLinks(config.cloud.organizationId)) {
+          if (["ended", "stale"].includes(session.lastState)) continue;
+          try {
+            await relay.post(`/v1/spike/sessions/${encodeURIComponent(session.cloudSessionId)}/end`, {}, randomUUID());
+            database.upsertCloudSession(config.cloud.organizationId, session.localSessionId, session.cloudSessionId, "ended");
+            ended += 1;
+          } catch {
+            failed += 1;
+          }
+        }
+        json(response, 200, { ended, failed });
         return;
       }
       if (method === "GET" && url.pathname === "/v1/inbox") {
