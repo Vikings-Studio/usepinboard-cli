@@ -1,15 +1,6 @@
 export const SCHEMA_VERSION = 1;
 
-export const SCHEMA_SQL = `
-PRAGMA journal_mode = WAL;
-PRAGMA foreign_keys = ON;
-PRAGMA busy_timeout = 5000;
-
-CREATE TABLE IF NOT EXISTS schema_migrations (
-  version INTEGER PRIMARY KEY,
-  applied_at INTEGER NOT NULL
-);
-
+const INITIAL_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS local_identity (
   id TEXT PRIMARY KEY,
   created_at INTEGER NOT NULL
@@ -106,3 +97,12 @@ CREATE TABLE IF NOT EXISTS outbox (
   created_at INTEGER NOT NULL
 );
 `;
+
+export interface SchemaMigration {
+  version: number;
+  sql: string;
+}
+
+export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
+  { version: 1, sql: INITIAL_SCHEMA_SQL },
+];

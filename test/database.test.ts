@@ -11,6 +11,20 @@ afterEach(async () => {
 });
 
 describe("local database", () => {
+  it("creates one durable local identity", async () => {
+    const paths = await temporaryPaths();
+    cleanup.push(paths.dataDir);
+    const first = await PinboardDatabase.open(paths);
+    const identity = first.localIdentity();
+    expect(identity).toMatch(/^[0-9a-f-]{36}$/u);
+    expect(first.localIdentity()).toBe(identity);
+    first.close();
+
+    const reopened = await PinboardDatabase.open(paths);
+    expect(reopened.localIdentity()).toBe(identity);
+    reopened.close();
+  });
+
   it("routes messages and leases between active sessions", async () => {
     const paths = await temporaryPaths();
     cleanup.push(paths.dataDir);
@@ -51,6 +65,96 @@ describe("local database", () => {
     const sent = database.sendMessage({ to: first.address, body: "target" });
     expect(sent.message.recipientSessionId).toBe(first.id);
     expect(sent.alternatives.map((session) => session.id)).toContain(second.id);
+    database.close();
+  });
+
+  it("does not resolve an address to a same-basename repository", async () => {
+    const paths = await temporaryPaths();
+    cleanup.push(paths.dataDir);
+    const database = await PinboardDatabase.open(paths);
+    const first = database.registerSession({
+      id: randomUUID(),
+      provider: "codex",
+      repository: {
+        identity: "https://github.com/first/api",
+        name: "api",
+        root: "/tmp/first/api",
+        branch: "main",
+      },
+    });
+    const second = database.registerSession({
+      id: randomUUID(),
+      provider: "codex",
+      repository: {
+        identity: "https://github.com/second/api",
+        name: "api",
+        root: "/tmp/second/api",
+        branch: "main",
+      },
+    });
+
+    expect(first.address).not.toBe(second.address);
+    const sent = database.sendMessage({ to: first.address, body: "first repository only" });
+    expect(sent.message.recipientSessionId).toBe(first.id);
+    expect(sent.alternatives).toHaveLength(0);
+    expect(database.inbox({ sessionId: second.id, unreadOnly: true })).toHaveLength(0);
+    database.close();
+  });
+
+  it("rejects a legacy address that is ambiguous across repositories", async () => {
+    const paths = await temporaryPaths();
+    cleanup.push(paths.dataDir);
+    const database = await PinboardDatabase.open(paths);
+    const first = database.registerSession({
+      id: randomUUID(),
+      provider: "codex",
+      repository: { identity: "local:first-api", name: "api", root: "/tmp/first-api", branch: "main" },
+    });
+    const second = database.registerSession({
+      id: randomUUID(),
+      provider: "codex",
+      repository: { identity: "local:second-api", name: "api", root: "/tmp/second-api", branch: "main" },
+    });
+    const legacyAddress = "local/codex@api#main";
+    database.database.prepare("UPDATE sessions SET address = ? WHERE id IN (?, ?)").run(
+      legacyAddress,
+      first.id,
+      second.id,
+    );
+
+    expect(() => database.sendMessage({ to: legacyAddress, body: "must not cross repositories" })).toThrow(
+      /ambiguous across repositories/u,
+    );
+    database.close();
+  });
+
+  it("only lets the recipient create a read receipt", async () => {
+    const paths = await temporaryPaths();
+    cleanup.push(paths.dataDir);
+    const database = await PinboardDatabase.open(paths);
+    const repository = { identity: "local:receipts", name: "receipts", root: "/tmp/receipts", branch: "main" };
+    const sender = database.registerSession({ id: randomUUID(), provider: "codex", repository });
+    const recipient = database.registerSession({ id: randomUUID(), provider: "claude-code", repository });
+    const sent = database.sendMessage({ senderSessionId: sender.id, to: recipient.id, body: "hello" });
+
+    expect(() => database.markRead(sent.message.id, sender.id)).toThrow(/was not found for session/u);
+    expect(database.inbox({ sessionId: recipient.id, unreadOnly: true })).toHaveLength(1);
+    database.markRead(sent.message.id, recipient.id);
+    expect(database.inbox({ sessionId: recipient.id, unreadOnly: true })).toHaveLength(0);
+    database.close();
+  });
+
+  it("rejects unsafe lease paths before persistence", async () => {
+    const paths = await temporaryPaths();
+    cleanup.push(paths.dataDir);
+    const database = await PinboardDatabase.open(paths);
+    const repository = { identity: "local:leases", name: "leases", root: "/tmp/leases", branch: "main" };
+    const owner = database.registerSession({ id: randomUUID(), provider: "codex", repository });
+
+    expect(() => database.createLease({ sessionId: owner.id, paths: ["../outside"], ttlMinutes: 5 })).toThrow(
+      /cannot traverse/u,
+    );
+    expect(database.listLeases(repository.identity)).toHaveLength(0);
     database.close();
   });
 });

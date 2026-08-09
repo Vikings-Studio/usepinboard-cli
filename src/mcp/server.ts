@@ -30,6 +30,10 @@ function safeSession(session: SessionRecord) {
   };
 }
 
+export function resolveDiscoveryRepository(requested: string | undefined, current: string): string {
+  return requested ?? current;
+}
+
 export async function runMcpServer(options: {
   provider: Provider;
   sessionId?: string;
@@ -60,12 +64,13 @@ export async function runMcpServer(options: {
       },
     },
     async ({ repo, branch, include_idle }) => {
+      const repositoryIdentity = resolveDiscoveryRepository(repo, repository.identity);
       const query = new URLSearchParams();
-      if (repo) query.set("repo", repo);
+      query.set("repo", repositoryIdentity);
       if (branch) query.set("branch", branch);
       query.set("includeIdle", String(include_idle));
       const sessions = await client.get<SessionRecord[]>(`/v1/presence?${query.toString()}`);
-      const leases = await client.get<LeaseRecord[]>(`/v1/leases?repo=${encodeURIComponent(repo ?? repository.identity)}`);
+      const leases = await client.get<LeaseRecord[]>(`/v1/leases?repo=${encodeURIComponent(repositoryIdentity)}`);
       return result({
         sessions: sessions.filter((item) => item.id !== sessionId).map(safeSession),
         leases: leases.map((lease) => ({

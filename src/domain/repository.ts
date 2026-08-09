@@ -60,7 +60,13 @@ export function detectRepository(cwd = process.cwd()): RepositoryContext {
   };
 }
 
-export function makeAddress(provider: string, repositoryName: string, branch: string): string {
+export function makeAddress(
+  provider: string,
+  repositoryName: string,
+  repositoryIdentity: string,
+  branch: string,
+): string {
   const safe = (value: string) => value.replace(/[\s/@#]+/gu, "-").replace(/^-+|-+$/gu, "") || "unknown";
-  return `local/${safe(provider)}@${safe(repositoryName)}#${safe(branch)}`;
+  const repositoryKey = createHash("sha256").update(repositoryIdentity).digest("hex").slice(0, 32);
+  return `local/${safe(provider)}@${safe(repositoryName)}~${repositoryKey}#${safe(branch)}`;
 }

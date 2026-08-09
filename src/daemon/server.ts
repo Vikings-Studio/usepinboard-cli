@@ -1,12 +1,14 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createConnection } from "node:net";
 import { chmod, unlink, writeFile, rm } from "node:fs/promises";
 import { platform } from "node:os";
 import { z } from "zod";
-import { ERROR_CODES, MAX_REQUEST_BYTES } from "../constants.js";
-import { DaemonClient } from "./client.js";
+import { ERROR_CODES, MAX_REQUEST_BYTES, PROTOCOL_VERSION } from "../constants.js";
+import { acquireDaemonLock } from "./lock.js";
 import type { ApiErrorBody } from "../domain/types.js";
 import { ensureDirectories, getPaths, type PinboardPaths } from "../platform/paths.js";
 import { heartbeatSchema, leaseSchema, sendMessageSchema, sessionSchema } from "../protocol/schemas.js";
+import { PROTOCOL_VERSION_HEADER, checkProtocolCompatibility } from "../protocol/version.js";
 import { readOrCreateLocalSecret, verifyBearer } from "../security/local-auth.js";
 import { PinboardDatabase } from "../storage/database.js";
 
@@ -21,6 +23,7 @@ function json(response: ServerResponse, status: number, body: unknown): void {
     "content-type": "application/json; charset=utf-8",
     "content-length": Buffer.byteLength(data),
     "cache-control": "no-store",
+    [PROTOCOL_VERSION_HEADER]: String(PROTOCOL_VERSION),
   });
   response.end(data);
 }
@@ -54,6 +57,24 @@ function safeMessage(error: unknown): string {
   return "Unexpected local daemon error";
 }
 
+async function endpointIsOccupied(paths: PinboardPaths): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const socket = createConnection(paths.socket);
+    let settled = false;
+    const finish = (occupied: boolean): void => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(occupied);
+    };
+    socket.setTimeout(500, () => finish(true));
+    socket.once("connect", () => finish(true));
+    socket.once("error", (error: NodeJS.ErrnoException) => {
+      finish(!["ECONNREFUSED", "ENOENT"].includes(error.code ?? ""));
+    });
+  });
+}
+
 export async function startDaemon(options: {
   version: string;
   paths?: PinboardPaths;
@@ -63,27 +84,39 @@ export async function startDaemon(options: {
   await ensureDirectories(paths);
   const secret = await readOrCreateLocalSecret(paths);
 
-  try {
-    await new DaemonClient(paths).get("/health");
+  const daemonLock = await acquireDaemonLock(paths, () => endpointIsOccupied(paths));
+
+  if (await endpointIsOccupied(paths)) {
+    await daemonLock.release();
     throw new Error(`A Pinboard daemon is already listening at ${paths.socket}`);
+  }
+
+  let database: PinboardDatabase | undefined;
+
+  try {
+    database = await PinboardDatabase.open(paths);
   } catch (error) {
-    if (error instanceof Error && error.message.startsWith("A Pinboard daemon is already")) throw error;
+    await daemonLock.release();
+    throw error;
   }
-
-  const database = await PinboardDatabase.open(paths);
   const startedAt = Date.now();
-
-  if (platform() !== "win32") {
-    await unlink(paths.socket).catch((error: unknown) => {
-      if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error;
-    });
-  }
 
   // The callback contains its own request-level error boundary below.
   // eslint-disable-next-line @typescript-eslint/no-misused-promises
   const server = createServer(async (request, response) => {
     if (!verifyBearer(request.headers.authorization, secret)) {
       apiError(response, 401, ERROR_CODES.unauthorized, "Local daemon authorization failed");
+      return;
+    }
+
+    const protocol = checkProtocolCompatibility(request.headers[PROTOCOL_VERSION_HEADER]);
+    if (!protocol.compatible) {
+      apiError(
+        response,
+        426,
+        ERROR_CODES.protocolVersionMismatch,
+        `Pinboard protocol v${protocol.expected} is required; received ${protocol.received ?? "no valid version"}`,
+      );
       return;
     }
 
@@ -224,21 +257,90 @@ export async function startDaemon(options: {
     }
   });
 
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(paths.socket, () => resolve());
-  });
-
-  if (platform() !== "win32") await chmod(paths.socket, 0o600);
-  await writeFile(paths.pid, `${process.pid}\n`, { encoding: "utf8", mode: 0o600 });
-
-  const close = async (): Promise<void> => {
+  let ownsPid = false;
+  try {
+    if (platform() !== "win32") {
+      await unlink(paths.socket).catch((error: unknown) => {
+        if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error;
+      });
+    }
     await new Promise<void>((resolve, reject) => {
-      server.close((error) => (error ? reject(error) : resolve()));
+      server.once("error", reject);
+      server.listen(paths.socket, () => resolve());
     });
-    database.close();
-    await rm(paths.pid, { force: true });
-    if (platform() !== "win32") await rm(paths.socket, { force: true });
+
+    if (platform() !== "win32") await chmod(paths.socket, 0o600);
+    await writeFile(paths.pid, `${process.pid}\n`, { encoding: "utf8", mode: 0o600 });
+    ownsPid = true;
+  } catch (error) {
+    const cleanupErrors: unknown[] = [error];
+    const ownsSocket = server.listening;
+    if (server.listening) {
+      await new Promise<void>((resolve, reject) => {
+        server.close((cleanupError) => (cleanupError ? reject(cleanupError) : resolve()));
+      }).catch((cleanupError: unknown) => {
+        cleanupErrors.push(cleanupError);
+      });
+    }
+    try {
+      database.close();
+    } catch (cleanupError) {
+      cleanupErrors.push(cleanupError);
+    }
+    const ownedPaths = [
+      ...(ownsPid ? [paths.pid] : []),
+      ...(ownsSocket && platform() !== "win32" ? [paths.socket] : []),
+    ];
+    for (const path of ownedPaths) {
+      try {
+        await rm(path, { force: true });
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+    }
+    try {
+      await daemonLock.release();
+    } catch (cleanupError) {
+      cleanupErrors.push(cleanupError);
+    }
+    if (cleanupErrors.length > 1) throw new AggregateError(cleanupErrors, "Pinboard daemon startup cleanup failed");
+    throw error;
+  }
+
+  let closePromise: Promise<void> | undefined;
+  const close = async (): Promise<void> => {
+    closePromise ??= (async () => {
+      const cleanupErrors: unknown[] = [];
+      try {
+        if (server.listening) {
+          await new Promise<void>((resolve, reject) => {
+            server.close((error) => (error ? reject(error) : resolve()));
+          });
+        }
+      } catch (error) {
+        cleanupErrors.push(error);
+      } finally {
+        try {
+          database.close();
+        } catch (error) {
+          cleanupErrors.push(error);
+        }
+        for (const path of platform() === "win32" ? [paths.pid] : [paths.pid, paths.socket]) {
+          try {
+            await rm(path, { force: true });
+          } catch (error) {
+            cleanupErrors.push(error);
+          }
+        }
+        try {
+          await daemonLock.release();
+        } catch (error) {
+          cleanupErrors.push(error);
+        }
+      }
+      if (cleanupErrors.length > 0) throw new AggregateError(cleanupErrors, "Pinboard daemon cleanup failed");
+    })();
+    return closePromise;
   };
 
   return { close, paths };

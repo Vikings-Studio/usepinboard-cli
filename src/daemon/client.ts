@@ -1,8 +1,9 @@
 import { request } from "node:http";
-import { ERROR_CODES } from "../constants.js";
+import { ERROR_CODES, PROTOCOL_VERSION } from "../constants.js";
 import type { ApiErrorBody } from "../domain/types.js";
 import { getPaths, type PinboardPaths } from "../platform/paths.js";
-import { readLocalSecret } from "../security/local-auth.js";
+import { PROTOCOL_VERSION_HEADER, parseProtocolVersion } from "../protocol/version.js";
+import { InvalidLocalSecretError, readLocalSecret } from "../security/local-auth.js";
 
 export class DaemonClientError extends Error {
   readonly code: string;
@@ -39,7 +40,10 @@ export class DaemonClient {
     let secret: string;
     try {
       secret = await readLocalSecret(this.paths);
-    } catch {
+    } catch (error) {
+      if (error instanceof InvalidLocalSecretError) {
+        throw new DaemonClientError(error.message, ERROR_CODES.unauthorized, 401);
+      }
       throw new DaemonClientError(
         "Pinboard is not initialized. Run `pinboard init`.",
         ERROR_CODES.daemonUnavailable,
@@ -57,6 +61,7 @@ export class DaemonClient {
           headers: {
             authorization: `Bearer ${secret}`,
             accept: "application/json",
+            [PROTOCOL_VERSION_HEADER]: String(PROTOCOL_VERSION),
             ...(payload
               ? {
                   "content-type": "application/json",
@@ -69,6 +74,17 @@ export class DaemonClient {
           const chunks: Buffer[] = [];
           response.on("data", (chunk: Buffer) => chunks.push(chunk));
           response.on("end", () => {
+            const daemonProtocol = parseProtocolVersion(response.headers[PROTOCOL_VERSION_HEADER]);
+            if (daemonProtocol !== PROTOCOL_VERSION) {
+              reject(
+                new DaemonClientError(
+                  `Pinboard protocol mismatch: client v${PROTOCOL_VERSION}, daemon ${daemonProtocol === null ? "unknown" : `v${daemonProtocol}`}`,
+                  ERROR_CODES.protocolVersionMismatch,
+                  426,
+                ),
+              );
+              return;
+            }
             const raw = Buffer.concat(chunks).toString("utf8");
             let parsed: unknown = null;
             try {

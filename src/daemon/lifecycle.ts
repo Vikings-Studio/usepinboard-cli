@@ -1,14 +1,16 @@
 import { spawn } from "node:child_process";
 import { open, readFile, rm } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
-import { DaemonClient } from "./client.js";
+import { DaemonClient, DaemonClientError } from "./client.js";
+import { ERROR_CODES } from "../constants.js";
 import { ensureDirectories, getPaths, type PinboardPaths } from "../platform/paths.js";
 
 export async function daemonIsHealthy(paths: PinboardPaths = getPaths()): Promise<boolean> {
   try {
     await new DaemonClient(paths).get<{ ok: boolean }>("/health");
     return true;
-  } catch {
+  } catch (error) {
+    if (error instanceof DaemonClientError && error.code === ERROR_CODES.unauthorized) throw error;
     return false;
   }
 }

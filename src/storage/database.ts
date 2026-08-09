@@ -16,8 +16,9 @@ import type {
   SessionRecord,
 } from "../domain/types.js";
 import { ensureDirectories, getPaths, type PinboardPaths } from "../platform/paths.js";
+import { normalizeLeasePaths } from "../security/lease-path.js";
 import { sanitizeUntrustedText } from "../security/untrusted.js";
-import { SCHEMA_SQL, SCHEMA_VERSION } from "./schema.js";
+import { SCHEMA_MIGRATIONS, SCHEMA_VERSION } from "./schema.js";
 
 type SqlRow = Record<string, unknown>;
 
@@ -64,10 +65,34 @@ export class PinboardDatabase {
   static async open(paths: PinboardPaths = getPaths()): Promise<PinboardDatabase> {
     await ensureDirectories(paths);
     const database = new DatabaseSync(paths.database);
-    database.exec(SCHEMA_SQL);
-    database
-      .prepare("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)")
-      .run(SCHEMA_VERSION, Date.now());
+    database.exec(`
+      PRAGMA journal_mode = WAL;
+      PRAGMA foreign_keys = ON;
+      PRAGMA busy_timeout = 5000;
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        version INTEGER PRIMARY KEY,
+        applied_at INTEGER NOT NULL
+      );
+    `);
+    const versionRow = asRow(database.prepare("SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations").get());
+    const currentVersion = Number(versionRow.version);
+    if (currentVersion > SCHEMA_VERSION) {
+      database.close();
+      throw new Error(`Database schema ${currentVersion} is newer than supported schema ${SCHEMA_VERSION}`);
+    }
+    for (const migration of SCHEMA_MIGRATIONS) {
+      if (migration.version <= currentVersion) continue;
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        database.exec(migration.sql);
+        database.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)").run(migration.version, Date.now());
+        database.exec("COMMIT");
+      } catch (error) {
+        database.exec("ROLLBACK");
+        database.close();
+        throw error;
+      }
+    }
     return new PinboardDatabase(paths, database);
   }
 
@@ -75,10 +100,23 @@ export class PinboardDatabase {
     this.database.close();
   }
 
+  localIdentity(): string {
+    const existing = this.database.prepare("SELECT id FROM local_identity LIMIT 1").get();
+    if (existing) return text(asRow(existing).id);
+    const id = randomUUID();
+    this.database.prepare("INSERT INTO local_identity(id, created_at) VALUES (?, ?)").run(id, Date.now());
+    return id;
+  }
+
   registerSession(input: SessionInput): SessionRecord {
     const now = Date.now();
     const taskLabel = input.taskLabel ? sanitizeUntrustedText(input.taskLabel).slice(0, MAX_TASK_LABEL_BYTES) : null;
-    const address = makeAddress(input.provider, input.repository.name, input.repository.branch);
+    const address = makeAddress(
+      input.provider,
+      input.repository.name,
+      input.repository.identity,
+      input.repository.branch,
+    );
     this.database.exec("BEGIN IMMEDIATE");
     try {
       this.database
@@ -215,6 +253,10 @@ export class PinboardDatabase {
       ),
       [input.to, input.to],
     ).map((row) => this.mapSession(row));
+    const matchedRepositories = new Set(matches.map((session) => session.repositoryIdentity));
+    if (matchedRepositories.size > 1) {
+      throw new Error(`Address ${input.to} is ambiguous across repositories`);
+    }
     const recipient = matches[0];
     if (!recipient) throw new Error(`No active session matches ${input.to}`);
 
@@ -281,11 +323,14 @@ export class PinboardDatabase {
     const now = Date.now();
     this.database.exec("BEGIN IMMEDIATE");
     try {
-      this.database
+      const updated = this.database
         .prepare(
           "UPDATE messages SET status = 'read', surfaced_at = COALESCE(surfaced_at, ?), read_at = ? WHERE id = ? AND recipient_session_id = ?",
         )
         .run(now, now, messageId, sessionId);
+      if (Number(updated.changes) === 0) {
+        throw new Error(`Message ${messageId} was not found for session ${sessionId}`);
+      }
       this.database
         .prepare(
           "INSERT OR IGNORE INTO message_receipts(id, message_id, session_id, type, created_at) VALUES (?, ?, ?, 'read', ?)",
@@ -309,6 +354,7 @@ export class PinboardDatabase {
       throw new Error("TTL must be between 1 and 1440 minutes");
     }
     if (input.note && byteLength(input.note) > MAX_LEASE_NOTE_BYTES) throw new Error("Lease note exceeds 2 KiB");
+    const paths = normalizeLeasePaths(input.paths);
     const session = this.getSession(input.sessionId);
     const now = Date.now();
     const id = randomUUID();
@@ -325,7 +371,7 @@ export class PinboardDatabase {
         session.address,
         session.repositoryIdentity,
         session.branch,
-        JSON.stringify(input.paths.map((path) => sanitizeUntrustedText(path))),
+        JSON.stringify(paths),
         input.note ? sanitizeUntrustedText(input.note) : null,
         now,
         now + input.ttlMinutes * 60_000,

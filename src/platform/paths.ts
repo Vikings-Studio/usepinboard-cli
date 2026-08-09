@@ -8,6 +8,7 @@ export interface PinboardPaths {
   runtimeDir: string;
   database: string;
   secret: string;
+  lock: string;
   pid: string;
   log: string;
   socket: string;
@@ -43,6 +44,7 @@ export function getPaths(): PinboardPaths {
     runtimeDir,
     database: join(dataDir, "pinboard.sqlite3"),
     secret: join(runtimeDir, "local-secret"),
+    lock: join(runtimeDir, "pinboardd.lock"),
     pid: join(runtimeDir, "pinboardd.pid"),
     log: join(runtimeDir, "pinboardd.log"),
     socket,

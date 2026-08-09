@@ -15,5 +15,6 @@ export const ERROR_CODES = {
   addressNotFound: "ADDRESS_NOT_FOUND",
   daemonUnavailable: "DAEMON_UNAVAILABLE",
   conflict: "CONFLICT",
+  protocolVersionMismatch: "PROTOCOL_VERSION_MISMATCH",
   internal: "INTERNAL_ERROR",
 } as const;
