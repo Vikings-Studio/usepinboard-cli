@@ -54,7 +54,7 @@ describe("local database", () => {
     };
     expect(database.ingestCloudInbox({ organizationId: "org_1", repositoryId: "repo_cloud", cloudSessionId: cloudRecipient, nextCursor: null, messages: [message] })).toBe(1);
     expect(database.listThreads({ sessionId: recipient.id })).toHaveLength(2);
-    const remoteMessage = database.inbox({ sessionId: recipient.id, queuedOnly: true })[0];
+    const remoteMessage = database.inbox({ sessionId: recipient.id, queuedOnly: true }).find((item) => item.body === "remote");
     if (!remoteMessage) throw new Error("expected cloud message");
     expect(remoteMessage.threadId).not.toBe(collidingThread);
     expect(database.cloudRemoteThreadId("org_1", "repo_cloud", remoteMessage.threadId)).toBe(collidingThread);

@@ -11,10 +11,14 @@ describe("cloud credential file", () => {
     const paths = await temporaryPaths();
     cleanup.push(paths.dataDir);
     const token = "design_partner_token_0123456789";
+    if (process.platform === "win32") {
+      await expect(writeCloudCredential(paths, token)).rejects.toThrow(/unavailable on Windows; Personal remains supported/u);
+      return;
+    }
     await writeCloudCredential(paths, token);
     expect(await readCloudCredential(paths)).toBe(token);
     expect(JSON.parse(await readFile(paths.cloudCredentials, "utf8"))).toEqual({ version: 1, token });
-    if (process.platform !== "win32") expect((await lstat(paths.cloudCredentials)).mode & 0o777).toBe(0o600);
+    expect((await lstat(paths.cloudCredentials)).mode & 0o777).toBe(0o600);
     await removeCloudCredential(paths);
     await expect(readCloudCredential(paths)).rejects.toThrow(/not connected/u);
   });
