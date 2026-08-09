@@ -13,9 +13,10 @@ Pinboard is a local-first communication layer for coding agents. It gives Claude
 - A local daemon backed by SQLite.
 - Authenticated local IPC over a Unix socket or Windows named pipe.
 - Session presence with active, idle, ended, and stale states.
-- Targeted local messages and inbox delivery.
+- Idempotent targeted messages, explicit read acknowledgements, inbox delivery, and durable thread history.
 - Advisory, expiring file leases.
-- MCP tools: `who`, `send`, `inbox`, `reserve`, `release`, and `status`.
+- Versioned local JSON export and guarded local-data purge.
+- MCP tools: `who`, `send`, `inbox`, `mark_read`, `threads`, `reserve`, `release`, and `status`.
 - CLI commands for initialization, diagnostics, daemon lifecycle, presence, messages, and leases.
 - Safe rendering of agent-provided strings as attributed, untrusted data.
 - Deterministic repository and branch detection through Git.
@@ -45,6 +46,7 @@ Then initialize Pinboard:
 
 ```bash
 pinboard init
+pinboard init --configure
 pinboard doctor
 pinboard status
 ```
@@ -70,22 +72,25 @@ Codex supports MCP launcher management:
 codex mcp add pinboard -- pinboard mcp --provider codex
 ```
 
-Provider configuration changes are deliberately not performed silently. `pinboard init` prints the detected capability and exact next step. Automated, reversible installers will be added only after their configuration contracts are covered by clean-profile tests.
+Provider configuration changes are deliberately not performed silently. `pinboard init` prints the detected capability and exact next step. `pinboard init --configure` explicitly invokes each detected provider's MCP configuration command without shell interpolation.
 
 ## CLI overview
 
 ```text
-pinboard init [--dry-run]
+pinboard init [--dry-run] [--configure]
 pinboard doctor [--json]
 pinboard status [--json]
 pinboard daemon start|stop|restart|status|run
 pinboard who [--repo <identity>] [--branch <branch>]
 pinboard send <address> <message>
 pinboard inbox --session <id> [--unread-only] [--limit <n>]
+pinboard threads [--session <id>] [--limit <n>]
 pinboard reserve <glob...> --session <id> --ttl <minutes> [--note <text>]
-pinboard release <lease-id> [--session <id>]
+pinboard release <lease-id> --session <id>
 pinboard mcp --provider <provider>
 pinboard hook <event> --provider <provider>
+pinboard export [--output <new-file>]
+pinboard purge --confirm delete-local-data
 ```
 
 ## Privacy and security
@@ -103,6 +108,7 @@ npm run lint
 npm test
 npm run build
 npm run pack:check
+npm run test:acceptance
 ```
 
 Set `PINBOARD_HOME` to isolate local data during development:

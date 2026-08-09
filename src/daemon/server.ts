@@ -132,6 +132,10 @@ export async function startDaemon(options: {
         json(response, 200, database.status(options.version, startedAt));
         return;
       }
+      if (method === "GET" && url.pathname === "/v1/export") {
+        json(response, 200, database.exportSnapshot());
+        return;
+      }
       if (method === "POST" && url.pathname === "/v1/sessions") {
         const input = sessionSchema.parse(await readJson(request));
         json(
@@ -206,6 +210,18 @@ export async function startDaemon(options: {
         );
         return;
       }
+      if (method === "GET" && url.pathname === "/v1/threads") {
+        const sessionId = url.searchParams.get("sessionId") ?? undefined;
+        json(
+          response,
+          200,
+          database.listThreads({
+            ...(sessionId === undefined ? {} : { sessionId }),
+            limit: Number(url.searchParams.get("limit") ?? 20),
+          }),
+        );
+        return;
+      }
       if (method === "POST" && /^\/v1\/messages\/[^/]+\/read$/u.test(url.pathname)) {
         const messageId = segment(url.pathname, 2);
         const body = z.object({ sessionId: z.uuid() }).parse(await readJson(request));
@@ -235,7 +251,8 @@ export async function startDaemon(options: {
       if (method === "DELETE" && /^\/v1\/leases\/[^/]+$/u.test(url.pathname)) {
         const leaseId = segment(url.pathname, 2);
         if (!leaseId) throw new Error("Lease ID is required");
-        const sessionId = url.searchParams.get("sessionId") ?? undefined;
+        const sessionId = url.searchParams.get("sessionId");
+        if (!sessionId) throw new Error("sessionId is required to release a lease");
         const released = database.releaseLease(leaseId, sessionId);
         if (!released) {
           apiError(response, 404, ERROR_CODES.notFound, "Active lease was not found");

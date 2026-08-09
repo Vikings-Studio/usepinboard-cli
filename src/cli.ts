@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFile } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
 import { Command } from "commander";
@@ -8,11 +8,11 @@ import { DaemonClient, DaemonClientError } from "./daemon/client.js";
 import { daemonIsHealthy, startBackgroundDaemon, stopBackgroundDaemon } from "./daemon/lifecycle.js";
 import { startDaemon } from "./daemon/server.js";
 import { detectRepository } from "./domain/repository.js";
-import type { DaemonStatus, LeaseRecord, MessageRecord, Provider, SessionRecord } from "./domain/types.js";
-import { detectProviders } from "./integrations/detect.js";
+import type { DaemonStatus, LeaseRecord, LocalExportSnapshot, MessageRecord, Provider, SessionRecord, ThreadRecord } from "./domain/types.js";
+import { configureProviderMcp, detectProviders } from "./integrations/detect.js";
 import { handleProviderHook } from "./integrations/hook.js";
 import { runMcpServer } from "./mcp/server.js";
-import { ensureDirectories, getPaths } from "./platform/paths.js";
+import { ensureDirectories, getPaths, validatePurgeTarget } from "./platform/paths.js";
 import { readOrCreateLocalSecret } from "./security/local-auth.js";
 import { formatUntrusted } from "./security/untrusted.js";
 import { heading, line, printJson, success, warning } from "./cli/output.js";
@@ -58,7 +58,8 @@ program
   .command("init")
   .description("Initialize the local daemon and show provider setup")
   .option("--dry-run", "show changes without writing or starting the daemon")
-  .action(async (options: { dryRun?: boolean }) => {
+  .option("--configure", "explicitly register Pinboard MCP with every detected provider")
+  .action(async (options: { dryRun?: boolean; configure?: boolean }) => {
     const paths = getPaths();
     const providers = detectProviders();
     if (options.dryRun) {
@@ -66,7 +67,7 @@ program
         writes: [paths.dataDir, paths.database, paths.secret, paths.pid, paths.log],
         socket: paths.socket,
         providers,
-        note: "No provider configuration is changed automatically.",
+        providerConfiguration: options.configure ? "would configure detected providers" : "unchanged",
       });
       return;
     }
@@ -81,13 +82,20 @@ program
     for (const item of providers) {
       if (item.installed) {
         success(`${item.id}: ${item.version ?? "detected"}`);
-        line(`  ${item.mcpCommand}`);
+        if (options.configure) {
+          configureProviderMcp(item.id);
+          success(`  Registered MCP server in ${item.id}`);
+        } else {
+          line(`  ${item.mcpCommand}`);
+        }
       } else {
         warning(`${item.id}: not detected`);
       }
     }
     line();
-    line("Pinboard does not edit provider configuration silently. Run the shown MCP command, then `pinboard doctor`.");
+    line(options.configure
+      ? "Provider configuration was requested explicitly. Run `pinboard doctor`."
+      : "Pinboard does not edit provider configuration silently. Run the shown MCP command or re-run `pinboard init --configure`, then `pinboard doctor`.");
   });
 
 program
@@ -111,7 +119,10 @@ program
       (healthy ? success : warning)(`Daemon ${healthy ? "healthy" : "not running"}`);
       for (const item of report.providers) {
         (item.installed ? success : warning)(`${item.id}: ${item.version ?? "not detected"}`);
-        if (item.installed) line(`  Hooks: ${item.hookSupport}; verify on the exact provider version before enabling injection.`);
+        if (item.installed) {
+          (item.mcpConfigured ? success : warning)(`  MCP: ${item.mcpConfigured ? "configured" : "not configured"}`);
+          line(`  Hooks: ${item.hookSupport}; verify on the exact provider version before enabling injection.`);
+        }
       }
     }
     if (!node.supported || !healthy) process.exitCode = 1;
@@ -227,6 +238,28 @@ program
   });
 
 program
+  .command("threads")
+  .description("List durable local conversation history")
+  .option("--session <id>", "limit history to one session")
+  .option("--limit <n>", "maximum threads", numeric, 20)
+  .option("--json")
+  .action(async (options: { session?: string; limit: number; json?: boolean }) => {
+    const client = await ensureStarted();
+    const query = new URLSearchParams({ limit: String(options.limit) });
+    if (options.session) query.set("sessionId", options.session);
+    const threads = await client.get<ThreadRecord[]>(`/v1/threads?${query.toString()}`);
+    if (options.json) printJson(threads);
+    else if (threads.length === 0) line("No conversation history yet.");
+    else {
+      for (const thread of threads) {
+        heading(`${thread.id} · ${thread.messageCount} message${thread.messageCount === 1 ? "" : "s"}`);
+        line(`  ${thread.participants.join(" ↔ ")}`);
+        line(`  Last activity: ${thread.lastMessageAt}${thread.unreadCount ? ` · ${thread.unreadCount} unread` : ""}`);
+      }
+    }
+  });
+
+program
   .command("reserve")
   .description("Create an advisory file lease")
   .argument("<paths...>", "path globs")
@@ -250,11 +283,10 @@ program
   .command("release")
   .description("Release an advisory lease")
   .argument("<lease-id>")
-  .option("--session <id>")
-  .action(async (leaseId: string, options: { session?: string }) => {
+  .requiredOption("--session <id>", "owner session ID")
+  .action(async (leaseId: string, options: { session: string }) => {
     const client = await ensureStarted();
-    const suffix = options.session ? `?sessionId=${encodeURIComponent(options.session)}` : "";
-    await client.delete(`/v1/leases/${leaseId}${suffix}`);
+    await client.delete(`/v1/leases/${leaseId}?sessionId=${encodeURIComponent(options.session)}`);
     success(`Lease ${leaseId} released`);
   });
 
@@ -311,6 +343,37 @@ program
     } catch {
       warning("No daemon log exists yet");
     }
+  });
+
+program
+  .command("export")
+  .description("Export all local Pinboard data as versioned JSON")
+  .option("--output <path>", "write to a file instead of standard output")
+  .action(async (options: { output?: string }) => {
+    const client = await ensureStarted();
+    const snapshot = await client.get<LocalExportSnapshot>("/v1/export");
+    const serialized = `${JSON.stringify(snapshot, null, 2)}\n`;
+    if (options.output) {
+      await writeFile(options.output, serialized, { encoding: "utf8", mode: 0o600, flag: "wx" });
+      success(`Local data exported to ${options.output}`);
+    } else {
+      process.stdout.write(serialized);
+    }
+  });
+
+program
+  .command("purge")
+  .description("Permanently delete local Pinboard state")
+  .requiredOption("--confirm <phrase>", "must be exactly: delete-local-data")
+  .action(async (options: { confirm: string }) => {
+    if (options.confirm !== "delete-local-data") {
+      throw new Error("Refusing to purge. Pass --confirm delete-local-data after exporting anything you need.");
+    }
+    const paths = getPaths();
+    const target = validatePurgeTarget(paths.dataDir);
+    await stopBackgroundDaemon(paths);
+    await rm(target, { recursive: true, force: true });
+    success(`Deleted local Pinboard data at ${target}. This cannot be recovered without an export.`);
   });
 
 program.parseAsync().catch((error: unknown) => {

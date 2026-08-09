@@ -81,6 +81,10 @@ try {
 
   const inbox = runJson(["inbox", "--session", claude.id, "--unread-only", "--json"]);
   if (inbox.length !== 1 || inbox[0]?.id !== first.message.id) throw new Error("Recipient inbox delivery failed");
+  const threads = runJson(["threads", "--session", claude.id, "--json"]);
+  if (threads.length !== 1 || threads[0]?.id !== first.message.threadId) {
+    throw new Error("Durable conversation history failed");
+  }
 
   const lease = runJson([
     "reserve",
@@ -97,7 +101,7 @@ try {
 
   const status = runJson(["status", "--json"]);
   if (status.status?.sessions?.active < 2) throw new Error("Daemon status lost an active acceptance session");
-  process.stdout.write("Pinboard local acceptance passed: presence, idempotent messaging, inbox, and leases.\n");
+  process.stdout.write("Pinboard local acceptance passed: presence, idempotent messaging, inbox, history, and leases.\n");
 } finally {
   try {
     run(["daemon", "stop"]);

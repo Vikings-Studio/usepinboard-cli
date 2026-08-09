@@ -12,8 +12,10 @@ import type {
   DaemonStatus,
   LeaseRecord,
   MessageRecord,
+  LocalExportSnapshot,
   SessionInput,
   SessionRecord,
+  ThreadRecord,
 } from "../domain/types.js";
 import { ensureDirectories, getPaths, type PinboardPaths } from "../platform/paths.js";
 import { normalizeLeasePaths } from "../security/lease-path.js";
@@ -106,6 +108,25 @@ export class PinboardDatabase {
     const id = randomUUID();
     this.database.prepare("INSERT INTO local_identity(id, created_at) VALUES (?, ?)").run(id, Date.now());
     return id;
+  }
+
+  exportSnapshot(): LocalExportSnapshot {
+    const rows = (table: string): Record<string, unknown>[] =>
+      this.database.prepare(`SELECT * FROM ${table}`).all().map((row) => ({ ...(row as Record<string, unknown>) }));
+    return {
+      format: "pinboard-local-export",
+      formatVersion: 1,
+      schemaVersion: SCHEMA_VERSION,
+      exportedAt: new Date().toISOString(),
+      localIdentity: this.localIdentity(),
+      repositories: rows("repositories"),
+      sessions: rows("sessions"),
+      threads: rows("threads"),
+      messages: rows("messages"),
+      messageReceipts: rows("message_receipts"),
+      leases: rows("leases"),
+      settings: rows("settings"),
+    };
   }
 
   registerSession(input: SessionInput): SessionRecord {
@@ -325,6 +346,43 @@ export class PinboardDatabase {
     return rows.map((row) => this.getMessage(text(row.id)));
   }
 
+  listThreads(input: { sessionId?: string; limit?: number } = {}): ThreadRecord[] {
+    const limit = Math.min(Math.max(input.limit ?? 20, 1), 100);
+    const sessionFilter = input.sessionId
+      ? "WHERE m.sender_session_id = ? OR m.recipient_session_id = ?"
+      : "";
+    const values: Array<string | number> = input.sessionId ? [input.sessionId, input.sessionId, limit] : [limit];
+    const rows = this.all(
+      this.database.prepare(
+        `SELECT
+           t.id,
+           t.created_at,
+           t.updated_at,
+           MAX(m.created_at) AS last_message_at,
+           COUNT(m.id) AS message_count,
+           SUM(CASE WHEN m.status != 'read'${input.sessionId ? " AND m.recipient_session_id = ?" : ""} THEN 1 ELSE 0 END) AS unread_count,
+           GROUP_CONCAT(DISTINCT m.sender_address) AS senders,
+           GROUP_CONCAT(DISTINCT m.recipient_address) AS recipients
+         FROM threads t
+         JOIN messages m ON m.thread_id = t.id
+         ${sessionFilter}
+         GROUP BY t.id
+         ORDER BY last_message_at DESC
+         LIMIT ?`,
+      ),
+      input.sessionId ? [input.sessionId, input.sessionId, input.sessionId, limit] : values,
+    );
+    return rows.map((row) => ({
+      id: text(row.id),
+      participants: [...new Set([...text(row.senders).split(","), ...text(row.recipients).split(",")])],
+      messageCount: Number(row.message_count),
+      unreadCount: Number(row.unread_count),
+      createdAt: iso(row.created_at),
+      updatedAt: iso(row.updated_at),
+      lastMessageAt: iso(row.last_message_at),
+    }));
+  }
+
   markRead(messageId: string, sessionId: string): void {
     const now = Date.now();
     this.database.exec("BEGIN IMMEDIATE");
@@ -398,13 +456,9 @@ export class PinboardDatabase {
     ).map((row) => this.mapLease(row));
   }
 
-  releaseLease(leaseId: string, sessionId?: string): boolean {
-    const conditions = ["id = ?", "released_at IS NULL"];
-    const values: Array<string | number | null> = [Date.now(), leaseId];
-    if (sessionId) {
-      conditions.push("owner_session_id = ?");
-      values.push(sessionId);
-    }
+  releaseLease(leaseId: string, sessionId: string): boolean {
+    const conditions = ["id = ?", "released_at IS NULL", "owner_session_id = ?"];
+    const values: Array<string | number | null> = [Date.now(), leaseId, sessionId];
     const result = this.database
       .prepare(`UPDATE leases SET released_at = ? WHERE ${conditions.join(" AND ")}`)
       .run(...values);

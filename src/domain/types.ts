@@ -47,6 +47,16 @@ export interface MessageRecord {
   readAt: string | null;
 }
 
+export interface ThreadRecord {
+  id: string;
+  participants: string[];
+  messageCount: number;
+  unreadCount: number;
+  createdAt: string;
+  updatedAt: string;
+  lastMessageAt: string;
+}
+
 export interface LeaseRecord {
   id: string;
   ownerSessionId: string;
@@ -74,4 +84,19 @@ export interface ApiErrorBody {
     code: string;
     message: string;
   };
+}
+
+export interface LocalExportSnapshot {
+  format: "pinboard-local-export";
+  formatVersion: 1;
+  schemaVersion: number;
+  exportedAt: string;
+  localIdentity: string;
+  repositories: Record<string, unknown>[];
+  sessions: Record<string, unknown>[];
+  threads: Record<string, unknown>[];
+  messages: Record<string, unknown>[];
+  messageReceipts: Record<string, unknown>[];
+  leases: Record<string, unknown>[];
+  settings: Record<string, unknown>[];
 }

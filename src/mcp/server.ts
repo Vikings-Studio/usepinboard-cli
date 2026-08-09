@@ -4,7 +4,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { DaemonClient } from "../daemon/client.js";
 import { detectRepository } from "../domain/repository.js";
-import type { LeaseRecord, MessageRecord, Provider, SessionRecord } from "../domain/types.js";
+import type { LeaseRecord, MessageRecord, Provider, SessionRecord, ThreadRecord } from "../domain/types.js";
 import { formatUntrusted } from "../security/untrusted.js";
 
 function result(value: unknown) {
@@ -141,6 +141,19 @@ export async function runMcpServer(options: {
       await client.post(`/v1/messages/${message_id}/read`, { sessionId });
       return result({ ok: true, messageId: message_id });
     },
+  );
+
+  server.registerTool(
+    "threads",
+    {
+      description: "List durable local conversation history involving this session.",
+      inputSchema: { limit: z.number().int().min(1).max(100).default(20) },
+    },
+    async ({ limit }) => result({
+      threads: await client.get<ThreadRecord[]>(
+        `/v1/threads?sessionId=${encodeURIComponent(sessionId)}&limit=${String(limit)}`,
+      ),
+    }),
   );
 
   server.registerTool(

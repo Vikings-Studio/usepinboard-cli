@@ -49,6 +49,7 @@ describe("local database", () => {
 
     const lease = database.createLease({ sessionId: claude.id, paths: ["src/billing/**"], ttlMinutes: 30, note: "migration" });
     expect(database.listLeases(repository.identity)[0]?.paths).toEqual(["src/billing/**"]);
+    expect(database.releaseLease(lease.id, codex.id)).toBe(false);
     expect(database.releaseLease(lease.id, claude.id)).toBe(true);
     expect(database.listLeases(repository.identity)).toHaveLength(0);
     database.close();
@@ -171,6 +172,40 @@ describe("local database", () => {
     expect(retry.message.id).toBe(first.message.id);
     expect(retry.message.body).toBe("deliver once");
     expect(database.inbox({ sessionId: recipient.id })).toHaveLength(1);
+    database.close();
+  });
+
+  it("lists durable threads scoped to a participant", async () => {
+    const paths = await temporaryPaths();
+    cleanup.push(paths.dataDir);
+    const database = await PinboardDatabase.open(paths);
+    const repository = { identity: "local:threads", name: "threads", root: "/tmp/threads", branch: "main" };
+    const sender = database.registerSession({ id: randomUUID(), provider: "codex", repository });
+    const recipient = database.registerSession({ id: randomUUID(), provider: "claude-code", repository });
+    const outsider = database.registerSession({ id: randomUUID(), provider: "cli", repository });
+    const threadId = randomUUID();
+    database.sendMessage({ senderSessionId: sender.id, to: recipient.id, body: "first", threadId });
+    database.sendMessage({ senderSessionId: recipient.id, to: sender.id, body: "second", threadId });
+
+    expect(database.listThreads({ sessionId: sender.id })).toMatchObject([
+      { id: threadId, messageCount: 2, unreadCount: 1 },
+    ]);
+    expect(database.listThreads({ sessionId: outsider.id })).toHaveLength(0);
+    database.close();
+  });
+
+  it("exports a versioned local snapshot without daemon credentials", async () => {
+    const paths = await temporaryPaths();
+    cleanup.push(paths.dataDir);
+    const database = await PinboardDatabase.open(paths);
+    const repository = { identity: "local:export", name: "export", root: "/tmp/export", branch: "main" };
+    database.registerSession({ id: randomUUID(), provider: "codex", repository });
+    const snapshot = database.exportSnapshot();
+
+    expect(snapshot).toMatchObject({ format: "pinboard-local-export", formatVersion: 1, schemaVersion: 2 });
+    expect(snapshot.localIdentity).toMatch(/^[0-9a-f-]{36}$/u);
+    expect(snapshot.repositories).toHaveLength(1);
+    expect(JSON.stringify(snapshot)).not.toContain("local-secret");
     database.close();
   });
 });

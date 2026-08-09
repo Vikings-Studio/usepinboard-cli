@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { homedir, platform, tmpdir, userInfo } from "node:os";
-import { join } from "node:path";
+import { join, parse, resolve } from "node:path";
 import { mkdir, chmod } from "node:fs/promises";
 
 export interface PinboardPaths {
@@ -58,4 +58,17 @@ export async function ensureDirectories(paths = getPaths()): Promise<void> {
     await chmod(paths.dataDir, 0o700);
     await chmod(paths.runtimeDir, 0o700);
   }
+}
+
+export function validatePurgeTarget(dataDir: string, options: { cwd?: string; home?: string } = {}): string {
+  const target = resolve(dataDir);
+  const forbidden = new Set([
+    parse(target).root,
+    resolve(options.home ?? homedir()),
+    resolve(options.cwd ?? process.cwd()),
+  ]);
+  if (forbidden.has(target) || target.length < 8) {
+    throw new Error(`Refusing to purge unsafe Pinboard data path: ${target}`);
+  }
+  return target;
 }
