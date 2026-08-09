@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 
-const result = spawnSync("npm", ["pack", "--dry-run", "--json"], { encoding: "utf8", shell: false });
+const npmExecutable = process.platform === "win32" ? "npm.cmd" : "npm";
+const result = spawnSync(npmExecutable, ["pack", "--dry-run", "--json"], { encoding: "utf8", shell: false });
 if (result.error || result.status !== 0) {
   throw new Error(result.stderr || result.error?.message || "npm pack inspection failed");
 }
