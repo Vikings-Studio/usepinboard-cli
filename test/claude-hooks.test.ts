@@ -1,5 +1,6 @@
 import { chmod, lstat, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { platform } from "node:os";
 import { describe, expect, it } from "vitest";
 import {
   claudeHooksConfigured,
@@ -56,8 +57,10 @@ describe("Claude Code hook configuration", () => {
     expect(installed.backup).not.toBeNull();
     if (!installed.backup) throw new Error("Expected a settings backup");
     expect(JSON.parse(await readFile(settings, "utf8"))).toMatchObject({ theme: "dark" });
-    expect((await lstat(settings)).mode & 0o777).toBe(0o640);
-    expect((await lstat(installed.backup)).mode & 0o777).toBe(0o600);
+    if (platform() !== "win32") {
+      expect((await lstat(settings)).mode & 0o777).toBe(0o640);
+      expect((await lstat(installed.backup)).mode & 0o777).toBe(0o600);
+    }
     expect((await installClaudeHooks({ paths, home })).changed).toBe(false);
 
     const removed = await removeClaudeHooks({ paths, home });

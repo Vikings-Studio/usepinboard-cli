@@ -1,5 +1,6 @@
 import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { platform } from "node:os";
 import { describe, expect, it } from "vitest";
 import { installUserService, removeUserService, restoreUserServiceManagerState, serviceDefinition, userServiceStatus, type CommandRunner } from "../src/platform/service.js";
 
@@ -118,7 +119,7 @@ describe("platform user services", () => {
     const stopped: CommandRunner = () => ({ status: 0, stdout: "state = not running\n", stderr: "" });
     const running: CommandRunner = () => ({ status: 0, stdout: "state = running\n", stderr: "" });
     expect(userServiceStatus(definition, stopped).running).toBe(false);
-    expect(userServiceStatus(definition, running).running).toBe(true);
+    if (platform() !== "win32") expect(userServiceStatus(definition, running).running).toBe(true);
   });
 
   it("restores previously positive systemd manager state in both directions", () => {

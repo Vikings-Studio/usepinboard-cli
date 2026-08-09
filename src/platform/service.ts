@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { chmod, lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { homedir, platform } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 
 export type ServicePlatform = "darwin" | "linux" | "win32" | "unsupported";
 
@@ -78,7 +78,10 @@ export function serviceDefinition(options: {
     throw new Error("User services require absolute Node and Pinboard CLI paths");
   }
   const logPath = safeExecutable(options.logPath ?? join(home, ".local", "state", "pinboard", "pinboardd.log"));
-  const pinboardHome = options.pinboardHome ? resolve(safeExecutable(options.pinboardHome)) : null;
+  const pinboardHome = options.pinboardHome ? safeExecutable(options.pinboardHome) : null;
+  if (["darwin", "linux"].includes(currentPlatform) && pinboardHome && !isAbsolute(pinboardHome)) {
+    throw new Error("PINBOARD_HOME in a user service must be an absolute path");
+  }
   if (currentPlatform === "darwin") {
     const label = "com.usepinboard.pinboardd";
     return {
@@ -95,7 +98,7 @@ export function serviceDefinition(options: {
       platform: "linux",
       supported: true,
       label,
-      path: join(process.env.XDG_CONFIG_HOME ?? join(home, ".config"), "systemd", "user", label),
+      path: join(options.home === undefined ? process.env.XDG_CONFIG_HOME ?? join(home, ".config") : join(home, ".config"), "systemd", "user", label),
       content: `# Managed by @usepinboard/cli\n[Unit]\nDescription=Pinboard local coding-agent daemon\nDocumentation=https://github.com/Vikings-Studio/usepinboard-cli\n\n[Service]\nType=simple\nExecStart=${systemdArgument(nodeExecutable)} ${systemdArgument(cliExecutable)} daemon run${pinboardHome ? `\nEnvironment=${systemdArgument(`PINBOARD_HOME=${pinboardHome}`)}` : ""}\nRestart=on-failure\nRestartSec=2\nUMask=0077\nNoNewPrivileges=true\nRestrictSUIDSGID=true\nStandardOutput=append:${systemdArgument(logPath)}\nStandardError=append:${systemdArgument(logPath)}\n\n[Install]\nWantedBy=default.target\n`,
     };
   }
