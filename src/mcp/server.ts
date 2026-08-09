@@ -4,7 +4,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { DaemonClient } from "../daemon/client.js";
 import { detectRepository } from "../domain/repository.js";
-import type { LeaseRecord, MessageRecord, Provider, SessionRecord, ThreadRecord } from "../domain/types.js";
+import type { LeaseRecord, MessageRecord, Provider, SessionRecord, SessionRegistration, ThreadRecord } from "../domain/types.js";
 import { formatUntrusted } from "../security/untrusted.js";
 
 function result(value: unknown) {
@@ -43,13 +43,14 @@ export async function runMcpServer(options: {
   const client = new DaemonClient();
   const repository = detectRepository();
   const sessionId = options.sessionId ?? process.env.PINBOARD_SESSION_ID ?? randomUUID();
-  const session = await client.post<SessionRecord>("/v1/sessions", {
+  const registration = await client.post<SessionRegistration>("/v1/sessions", {
     id: sessionId,
     provider: options.provider,
     repository,
     ...(options.taskLabel ? { taskLabel: options.taskLabel } : {}),
     pid: process.ppid,
   });
+  const { session, capability } = registration;
 
   const server = new McpServer({ name: "pinboard", version: options.version });
 
@@ -102,7 +103,7 @@ export async function runMcpServer(options: {
           body: message,
           ...(thread_id ? { threadId: thread_id } : {}),
           ...(idempotency_key ? { idempotencyKey: idempotency_key } : {}),
-        }),
+        }, capability),
       ),
   );
 
@@ -118,6 +119,7 @@ export async function runMcpServer(options: {
     async ({ unread_only, limit }) => {
       const messages = await client.get<MessageRecord[]>(
         `/v1/inbox?sessionId=${encodeURIComponent(sessionId)}&unreadOnly=${String(unread_only)}&limit=${String(limit)}`,
+        capability,
       );
       return result({
         messages: messages.map((message) => ({
@@ -138,7 +140,7 @@ export async function runMcpServer(options: {
       inputSchema: { message_id: z.uuid() },
     },
     async ({ message_id }) => {
-      await client.post(`/v1/messages/${message_id}/read`, { sessionId });
+      await client.post(`/v1/messages/${message_id}/read`, { sessionId }, capability);
       return result({ ok: true, messageId: message_id });
     },
   );
@@ -152,6 +154,7 @@ export async function runMcpServer(options: {
     async ({ limit }) => result({
       threads: await client.get<ThreadRecord[]>(
         `/v1/threads?sessionId=${encodeURIComponent(sessionId)}&limit=${String(limit)}`,
+        capability,
       ),
     }),
   );
@@ -173,7 +176,7 @@ export async function runMcpServer(options: {
           paths,
           ttlMinutes: ttl_minutes,
           ...(note ? { note } : {}),
-        }),
+        }, capability),
       ),
   );
 
@@ -184,7 +187,7 @@ export async function runMcpServer(options: {
       inputSchema: { lease_id: z.uuid() },
     },
     async ({ lease_id }) =>
-      result(await client.delete(`/v1/leases/${lease_id}?sessionId=${encodeURIComponent(sessionId)}`)),
+      result(await client.delete(`/v1/leases/${lease_id}?sessionId=${encodeURIComponent(sessionId)}`, capability)),
   );
 
   server.registerTool(
@@ -194,7 +197,7 @@ export async function runMcpServer(options: {
   );
 
   const heartbeat = setInterval(() => {
-    void client.post(`/v1/sessions/${sessionId}/heartbeat`).catch(() => undefined);
+    void client.post(`/v1/sessions/${sessionId}/heartbeat`, {}, capability).catch(() => undefined);
   }, 60_000);
   heartbeat.unref();
 
@@ -203,7 +206,7 @@ export async function runMcpServer(options: {
 
   const end = () => {
     clearInterval(heartbeat);
-    void client.post(`/v1/sessions/${sessionId}/end`).finally(() => process.exit(0));
+    void client.post(`/v1/sessions/${sessionId}/end`, {}, capability).finally(() => process.exit(0));
   };
   process.once("SIGINT", end);
   process.once("SIGTERM", end);

@@ -11,6 +11,7 @@ export const MAX_REQUEST_BYTES = 64 * 1024;
 export const ERROR_CODES = {
   invalidInput: "INVALID_INPUT",
   unauthorized: "UNAUTHORIZED",
+  forbidden: "FORBIDDEN",
   notFound: "NOT_FOUND",
   addressNotFound: "ADDRESS_NOT_FOUND",
   daemonUnavailable: "DAEMON_UNAVAILABLE",

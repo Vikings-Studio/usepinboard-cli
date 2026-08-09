@@ -97,6 +97,8 @@ pinboard purge --confirm delete-local-data
 
 Personal data stays on the machine. The daemon does not contact Pinboard Cloud and telemetry is absent in this pre-alpha foundation. It binds to a permissioned local IPC endpoint and requires a random local bearer secret.
 
+Identity-bearing agent operations additionally require a per-session capability whose hash is stored in SQLite and omitted from exports. MCP integrations manage this capability internally; low-level session-scoped CLI commands accept it through `PINBOARD_SESSION_CAPABILITY` for diagnostics and automation.
+
 All strings originating in another agent—messages, lease notes, and task labels—must be treated as untrusted data. Pinboard wraps them with attributed, per-render boundaries and does not execute them or promote them to system instructions. See [the threat model](docs/threat-model.md) and [security policy](SECURITY.md).
 
 ## Development

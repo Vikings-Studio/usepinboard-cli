@@ -202,9 +202,10 @@ describe("local database", () => {
     database.registerSession({ id: randomUUID(), provider: "codex", repository });
     const snapshot = database.exportSnapshot();
 
-    expect(snapshot).toMatchObject({ format: "pinboard-local-export", formatVersion: 1, schemaVersion: 2 });
+    expect(snapshot).toMatchObject({ format: "pinboard-local-export", formatVersion: 1, schemaVersion: 3 });
     expect(snapshot.localIdentity).toMatch(/^[0-9a-f-]{36}$/u);
     expect(snapshot.repositories).toHaveLength(1);
+    expect(snapshot.sessions[0]).not.toHaveProperty("capability_hash");
     expect(JSON.stringify(snapshot)).not.toContain("local-secret");
     database.close();
   });

@@ -14,6 +14,8 @@ The daemon is the only stateful process and SQLite writer. CLI, MCP, and hook pr
 
 macOS and Linux use a Unix socket. Windows uses a named pipe. A random 256-bit bearer secret stored in a user-only runtime directory authenticates every request. Socket permissions are restricted where supported.
 
+Each registered provider session also receives a 256-bit capability. The daemon stores only its hash and requires it for operations performed as that session. The daemon secret protects the IPC endpoint; the session capability limits accidental identity confusion between connected providers.
+
 ## Persistence
 
 Node's built-in `node:sqlite` provides a synchronous SQLite API with WAL mode and foreign keys. The API remains release-candidate in Node 24, so all database usage is isolated in `PinboardDatabase` and covered by migration and end-to-end tests.

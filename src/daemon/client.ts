@@ -4,6 +4,7 @@ import type { ApiErrorBody } from "../domain/types.js";
 import { getPaths, type PinboardPaths } from "../platform/paths.js";
 import { PROTOCOL_VERSION_HEADER, parseProtocolVersion } from "../protocol/version.js";
 import { InvalidLocalSecretError, readLocalSecret } from "../security/local-auth.js";
+import { SESSION_CAPABILITY_HEADER } from "../security/session-capability.js";
 
 export class DaemonClientError extends Error {
   readonly code: string;
@@ -24,19 +25,19 @@ export class DaemonClient {
     this.paths = paths;
   }
 
-  async get<T>(path: string): Promise<T> {
-    return this.call<T>("GET", path);
+  async get<T>(path: string, sessionCapability?: string): Promise<T> {
+    return this.call<T>("GET", path, undefined, sessionCapability);
   }
 
-  async post<T>(path: string, body: unknown = {}): Promise<T> {
-    return this.call<T>("POST", path, body);
+  async post<T>(path: string, body: unknown = {}, sessionCapability?: string): Promise<T> {
+    return this.call<T>("POST", path, body, sessionCapability);
   }
 
-  async delete<T>(path: string): Promise<T> {
-    return this.call<T>("DELETE", path);
+  async delete<T>(path: string, sessionCapability?: string): Promise<T> {
+    return this.call<T>("DELETE", path, undefined, sessionCapability);
   }
 
-  private async call<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async call<T>(method: string, path: string, body?: unknown, sessionCapability?: string): Promise<T> {
     let secret: string;
     try {
       secret = await readLocalSecret(this.paths);
@@ -62,6 +63,7 @@ export class DaemonClient {
             authorization: `Bearer ${secret}`,
             accept: "application/json",
             [PROTOCOL_VERSION_HEADER]: String(PROTOCOL_VERSION),
+            ...(sessionCapability ? { [SESSION_CAPABILITY_HEADER]: sessionCapability } : {}),
             ...(payload
               ? {
                   "content-type": "application/json",

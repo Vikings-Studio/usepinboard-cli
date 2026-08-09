@@ -3,6 +3,7 @@ import { MAX_REQUEST_BYTES } from "../constants.js";
 import type { Provider } from "../domain/types.js";
 import { detectRepository } from "../domain/repository.js";
 import { DaemonClient } from "../daemon/client.js";
+import type { SessionRegistration } from "../domain/types.js";
 
 function stableUuid(value: string): string {
   const hex = createHash("sha256").update(value).digest("hex").slice(0, 32).split("");
@@ -51,14 +52,9 @@ export async function handleProviderHook(event: string, provider: Provider): Pro
   const cwd = stringField(input, "cwd", "working_directory") ?? process.cwd();
   const client = new DaemonClient();
 
-  if (/^(SessionEnd|session_end)$/u.test(event)) {
-    await client.post(`/v1/sessions/${sessionId}/end`);
-    return;
-  }
-
   const taskLabel = stringField(input, "prompt", "task", "task_label");
   const repository = detectRepository(cwd);
-  await client.post("/v1/sessions", {
+  const registration = await client.post<SessionRegistration>("/v1/sessions", {
     id: sessionId,
     provider,
     providerSessionId,
@@ -66,4 +62,7 @@ export async function handleProviderHook(event: string, provider: Provider): Pro
     ...(taskLabel ? { taskLabel } : {}),
     pid: process.ppid,
   });
+  if (/^(SessionEnd|session_end)$/u.test(event)) {
+    await client.post(`/v1/sessions/${sessionId}/end`, {}, registration.capability);
+  }
 }

@@ -33,6 +33,11 @@ export interface SessionRecord {
   endedAt: string | null;
 }
 
+export interface SessionRegistration {
+  session: SessionRecord;
+  capability: string;
+}
+
 export interface MessageRecord {
   id: string;
   threadId: string;

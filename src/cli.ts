@@ -8,7 +8,7 @@ import { DaemonClient, DaemonClientError } from "./daemon/client.js";
 import { daemonIsHealthy, startBackgroundDaemon, stopBackgroundDaemon } from "./daemon/lifecycle.js";
 import { startDaemon } from "./daemon/server.js";
 import { detectRepository } from "./domain/repository.js";
-import type { DaemonStatus, LeaseRecord, LocalExportSnapshot, MessageRecord, Provider, SessionRecord, ThreadRecord } from "./domain/types.js";
+import type { DaemonStatus, LeaseRecord, LocalExportSnapshot, MessageRecord, Provider, SessionRecord, SessionRegistration, ThreadRecord } from "./domain/types.js";
 import { configureProviderMcp, detectProviders } from "./integrations/detect.js";
 import { handleProviderHook } from "./integrations/hook.js";
 import { runMcpServer } from "./mcp/server.js";
@@ -30,6 +30,14 @@ function numeric(value: string): number {
 function provider(value: string): Provider {
   if (["claude-code", "codex", "cli", "unknown"].includes(value)) return value as Provider;
   throw new Error(`Unsupported provider: ${value}`);
+}
+
+function sessionCapability(): string {
+  const capability = process.env.PINBOARD_SESSION_CAPABILITY?.trim();
+  if (!capability) {
+    throw new Error("This session-scoped command requires PINBOARD_SESSION_CAPABILITY. Agent integrations set it internally.");
+  }
+  return capability;
 }
 
 async function ensureStarted(): Promise<DaemonClient> {
@@ -209,7 +217,7 @@ program
       ...(options.fromSession ? { senderSessionId: options.fromSession } : {}),
       ...(options.thread ? { threadId: options.thread } : {}),
       ...(options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {}),
-    });
+    }, options.fromSession ? sessionCapability() : undefined);
     if (options.json) printJson(sent);
     else success(`Message queued for ${to}`);
   });
@@ -225,6 +233,7 @@ program
     const client = await ensureStarted();
     const messages = await client.get<MessageRecord[]>(
       `/v1/inbox?sessionId=${encodeURIComponent(options.session)}&unreadOnly=${String(options.unreadOnly)}&limit=${String(options.limit)}`,
+      sessionCapability(),
     );
     if (options.json) printJson(messages);
     else {
@@ -247,7 +256,10 @@ program
     const client = await ensureStarted();
     const query = new URLSearchParams({ limit: String(options.limit) });
     if (options.session) query.set("sessionId", options.session);
-    const threads = await client.get<ThreadRecord[]>(`/v1/threads?${query.toString()}`);
+    const threads = await client.get<ThreadRecord[]>(
+      `/v1/threads?${query.toString()}`,
+      options.session ? sessionCapability() : undefined,
+    );
     if (options.json) printJson(threads);
     else if (threads.length === 0) line("No conversation history yet.");
     else {
@@ -274,7 +286,7 @@ program
       paths,
       ttlMinutes: options.ttl,
       ...(options.note ? { note: options.note } : {}),
-    });
+    }, sessionCapability());
     if (options.json) printJson(lease);
     else success(`Lease ${lease.id} active until ${lease.expiresAt}`);
   });
@@ -286,7 +298,7 @@ program
   .requiredOption("--session <id>", "owner session ID")
   .action(async (leaseId: string, options: { session: string }) => {
     const client = await ensureStarted();
-    await client.delete(`/v1/leases/${leaseId}?sessionId=${encodeURIComponent(options.session)}`);
+    await client.delete(`/v1/leases/${leaseId}?sessionId=${encodeURIComponent(options.session)}`, sessionCapability());
     success(`Lease ${leaseId} released`);
   });
 
@@ -321,7 +333,7 @@ program
   .action(async (options: { provider: Provider; task?: string }) => {
     const client = await ensureStarted();
     printJson(
-      await client.post("/v1/sessions", {
+      await client.post<SessionRegistration>("/v1/sessions", {
         id: randomUUID(),
         provider: options.provider,
         repository: detectRepository(),

@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 const INITIAL_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS local_identity (
@@ -111,5 +111,9 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
       ALTER TABLE messages ADD COLUMN idempotency_key TEXT;
       CREATE UNIQUE INDEX messages_idempotency_idx ON messages(idempotency_key) WHERE idempotency_key IS NOT NULL;
     `,
+  },
+  {
+    version: 3,
+    sql: "ALTER TABLE sessions ADD COLUMN capability_hash TEXT;",
   },
 ];

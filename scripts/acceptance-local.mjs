@@ -10,17 +10,17 @@ const cli = join(root, "dist", "cli.js");
 const pinboardHome = await mkdtemp(join(tmpdir(), "pinboard-acceptance-"));
 const environment = { ...process.env, PINBOARD_HOME: pinboardHome, NO_COLOR: "1" };
 
-function run(args, cwd = root) {
+function run(args, cwd = root, extraEnvironment = {}) {
   return execFileSync(process.execPath, [cli, ...args], {
     cwd,
-    env: environment,
+    env: { ...environment, ...extraEnvironment },
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   }).trim();
 }
 
-function runJson(args, cwd = root) {
-  return JSON.parse(run(args, cwd));
+function runJson(args, cwd = root, extraEnvironment = {}) {
+  return JSON.parse(run(args, cwd, extraEnvironment));
 }
 
 const daemon = spawn(process.execPath, [cli, "daemon", "run"], {
@@ -49,8 +49,12 @@ try {
   }
   if (!ready) throw new Error(`Daemon did not become healthy: ${daemonError}`);
 
-  const claude = runJson(["debug-register", "--provider", "claude-code", "--task", "billing"]);
-  const codex = runJson(["debug-register", "--provider", "codex", "--task", "checkout"]);
+  const claudeRegistration = runJson(["debug-register", "--provider", "claude-code", "--task", "billing"]);
+  const codexRegistration = runJson(["debug-register", "--provider", "codex", "--task", "checkout"]);
+  const claude = claudeRegistration.session;
+  const codex = codexRegistration.session;
+  const claudeEnvironment = { PINBOARD_SESSION_CAPABILITY: claudeRegistration.capability };
+  const codexEnvironment = { PINBOARD_SESSION_CAPABILITY: codexRegistration.capability };
   const presence = runJson(["who", "--include-idle", "--json"]);
   if (!presence.some((session) => session.id === claude.id) || !presence.some((session) => session.id === codex.id)) {
     throw new Error("Two-session presence discovery failed");
@@ -66,7 +70,7 @@ try {
     "--idempotency-key",
     idempotencyKey,
     "--json",
-  ]);
+  ], root, codexEnvironment);
   const retry = runJson([
     "send",
     claude.id,
@@ -76,12 +80,12 @@ try {
     "--idempotency-key",
     idempotencyKey,
     "--json",
-  ]);
+  ], root, codexEnvironment);
   if (first.message?.id !== retry.message?.id) throw new Error("Idempotent CLI retry produced a duplicate message");
 
-  const inbox = runJson(["inbox", "--session", claude.id, "--unread-only", "--json"]);
+  const inbox = runJson(["inbox", "--session", claude.id, "--unread-only", "--json"], root, claudeEnvironment);
   if (inbox.length !== 1 || inbox[0]?.id !== first.message.id) throw new Error("Recipient inbox delivery failed");
-  const threads = runJson(["threads", "--session", claude.id, "--json"]);
+  const threads = runJson(["threads", "--session", claude.id, "--json"], root, claudeEnvironment);
   if (threads.length !== 1 || threads[0]?.id !== first.message.threadId) {
     throw new Error("Durable conversation history failed");
   }
@@ -96,8 +100,8 @@ try {
     "--note",
     "acceptance",
     "--json",
-  ]);
-  run(["release", lease.id, "--session", claude.id]);
+  ], root, claudeEnvironment);
+  run(["release", lease.id, "--session", claude.id], root, claudeEnvironment);
 
   const status = runJson(["status", "--json"]);
   if (status.status?.sessions?.active < 2) throw new Error("Daemon status lost an active acceptance session");

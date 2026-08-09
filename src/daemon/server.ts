@@ -10,6 +10,11 @@ import { ensureDirectories, getPaths, type PinboardPaths } from "../platform/pat
 import { heartbeatSchema, leaseSchema, sendMessageSchema, sessionSchema } from "../protocol/schemas.js";
 import { PROTOCOL_VERSION_HEADER, checkProtocolCompatibility } from "../protocol/version.js";
 import { readOrCreateLocalSecret, verifyBearer } from "../security/local-auth.js";
+import {
+  generateSessionCapability,
+  hashSessionCapability,
+  SESSION_CAPABILITY_HEADER,
+} from "../security/session-capability.js";
 import { PinboardDatabase } from "../storage/database.js";
 
 export interface DaemonHandle {
@@ -120,6 +125,14 @@ export async function startDaemon(options: {
       return;
     }
 
+    const rawCapability = request.headers[SESSION_CAPABILITY_HEADER];
+    const sessionCapability = Array.isArray(rawCapability) ? rawCapability[0] : rawCapability;
+    const requireSessionCapability = (sessionId: string): boolean => {
+      if (database.sessionCapabilityMatches(sessionId, sessionCapability)) return true;
+      apiError(response, 403, ERROR_CODES.forbidden, "A valid capability for this session is required");
+      return false;
+    };
+
     try {
       const url = new URL(request.url ?? "/", "http://pinboard.local");
       const method = request.method ?? "GET";
@@ -138,23 +151,28 @@ export async function startDaemon(options: {
       }
       if (method === "POST" && url.pathname === "/v1/sessions") {
         const input = sessionSchema.parse(await readJson(request));
+        const capability = generateSessionCapability();
         json(
           response,
           201,
-          database.registerSession({
-            id: input.id,
-            provider: input.provider,
-            repository: input.repository,
-            ...(input.providerSessionId === undefined ? {} : { providerSessionId: input.providerSessionId }),
-            ...(input.taskLabel === undefined ? {} : { taskLabel: input.taskLabel }),
-            ...(input.pid === undefined ? {} : { pid: input.pid }),
-          }),
+          {
+            session: database.registerSession({
+              id: input.id,
+              provider: input.provider,
+              repository: input.repository,
+              ...(input.providerSessionId === undefined ? {} : { providerSessionId: input.providerSessionId }),
+              ...(input.taskLabel === undefined ? {} : { taskLabel: input.taskLabel }),
+              ...(input.pid === undefined ? {} : { pid: input.pid }),
+            }, hashSessionCapability(capability)),
+            capability,
+          },
         );
         return;
       }
       if (method === "POST" && /^\/v1\/sessions\/[^/]+\/heartbeat$/u.test(url.pathname)) {
         const id = segment(url.pathname, 2);
         if (!id) throw new Error("Session ID is required");
+        if (!requireSessionCapability(id)) return;
         const body = heartbeatSchema.parse(await readJson(request));
         json(response, 200, database.heartbeat(id, body.taskLabel));
         return;
@@ -162,6 +180,7 @@ export async function startDaemon(options: {
       if (method === "POST" && /^\/v1\/sessions\/[^/]+\/end$/u.test(url.pathname)) {
         const id = segment(url.pathname, 2);
         if (!id) throw new Error("Session ID is required");
+        if (!requireSessionCapability(id)) return;
         database.endSession(id);
         json(response, 200, { ok: true });
         return;
@@ -183,6 +202,7 @@ export async function startDaemon(options: {
       }
       if (method === "POST" && url.pathname === "/v1/messages") {
         const input = sendMessageSchema.parse(await readJson(request));
+        if (input.senderSessionId && !requireSessionCapability(input.senderSessionId)) return;
         json(
           response,
           201,
@@ -199,6 +219,7 @@ export async function startDaemon(options: {
       if (method === "GET" && url.pathname === "/v1/inbox") {
         const sessionId = url.searchParams.get("sessionId");
         if (!sessionId) throw new Error("sessionId is required");
+        if (!requireSessionCapability(sessionId)) return;
         json(
           response,
           200,
@@ -212,6 +233,7 @@ export async function startDaemon(options: {
       }
       if (method === "GET" && url.pathname === "/v1/threads") {
         const sessionId = url.searchParams.get("sessionId") ?? undefined;
+        if (sessionId && !requireSessionCapability(sessionId)) return;
         json(
           response,
           200,
@@ -226,12 +248,14 @@ export async function startDaemon(options: {
         const messageId = segment(url.pathname, 2);
         const body = z.object({ sessionId: z.uuid() }).parse(await readJson(request));
         if (!messageId) throw new Error("Message ID is required");
+        if (!requireSessionCapability(body.sessionId)) return;
         database.markRead(messageId, body.sessionId);
         json(response, 200, { ok: true });
         return;
       }
       if (method === "POST" && url.pathname === "/v1/leases") {
         const input = leaseSchema.parse(await readJson(request));
+        if (!requireSessionCapability(input.sessionId)) return;
         json(
           response,
           201,
@@ -253,6 +277,7 @@ export async function startDaemon(options: {
         if (!leaseId) throw new Error("Lease ID is required");
         const sessionId = url.searchParams.get("sessionId");
         if (!sessionId) throw new Error("sessionId is required to release a lease");
+        if (!requireSessionCapability(sessionId)) return;
         const released = database.releaseLease(leaseId, sessionId);
         if (!released) {
           apiError(response, 404, ERROR_CODES.notFound, "Active lease was not found");

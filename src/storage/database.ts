@@ -19,6 +19,7 @@ import type {
 } from "../domain/types.js";
 import { ensureDirectories, getPaths, type PinboardPaths } from "../platform/paths.js";
 import { normalizeLeasePaths } from "../security/lease-path.js";
+import { verifySessionCapability as capabilityMatches } from "../security/session-capability.js";
 import { sanitizeUntrustedText, truncateUtf8 } from "../security/untrusted.js";
 import { SCHEMA_MIGRATIONS, SCHEMA_VERSION } from "./schema.js";
 
@@ -120,7 +121,11 @@ export class PinboardDatabase {
       exportedAt: new Date().toISOString(),
       localIdentity: this.localIdentity(),
       repositories: rows("repositories"),
-      sessions: rows("sessions"),
+      sessions: this.database.prepare(
+        `SELECT id, address, provider, provider_session_id, repository_identity, branch,
+                task_label, pid, state, started_at, last_active_at, ended_at
+         FROM sessions`,
+      ).all().map((row) => ({ ...(row as Record<string, unknown>) })),
       threads: rows("threads"),
       messages: rows("messages"),
       messageReceipts: rows("message_receipts"),
@@ -129,7 +134,7 @@ export class PinboardDatabase {
     };
   }
 
-  registerSession(input: SessionInput): SessionRecord {
+  registerSession(input: SessionInput, capabilityHash?: string): SessionRecord {
     const now = Date.now();
     const taskLabel = input.taskLabel ? truncateUtf8(sanitizeUntrustedText(input.taskLabel), MAX_TASK_LABEL_BYTES) : null;
     const address = makeAddress(
@@ -152,7 +157,8 @@ export class PinboardDatabase {
           `INSERT INTO sessions(
              id, address, provider, provider_session_id, repository_identity, branch,
              task_label, pid, state, started_at, last_active_at, ended_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, NULL)
+             , capability_hash
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, NULL, ?)
            ON CONFLICT(id) DO UPDATE SET
              address = excluded.address,
              provider = excluded.provider,
@@ -162,6 +168,7 @@ export class PinboardDatabase {
              task_label = COALESCE(excluded.task_label, sessions.task_label),
              pid = excluded.pid,
              state = 'active',
+             capability_hash = COALESCE(excluded.capability_hash, sessions.capability_hash),
              last_active_at = excluded.last_active_at,
              ended_at = NULL`,
         )
@@ -176,6 +183,7 @@ export class PinboardDatabase {
           input.pid ?? null,
           now,
           now,
+          capabilityHash ?? null,
         );
       this.database.exec("COMMIT");
     } catch (error) {
@@ -183,6 +191,14 @@ export class PinboardDatabase {
       throw error;
     }
     return this.getSession(input.id);
+  }
+
+  sessionCapabilityMatches(sessionId: string, capability: string | undefined): boolean {
+    if (!capability) return false;
+    const row = this.database.prepare("SELECT capability_hash FROM sessions WHERE id = ?").get(sessionId);
+    if (!row) return false;
+    const expectedHash = nullableText(asRow(row).capability_hash);
+    return expectedHash !== null && capabilityMatches(capability, expectedHash);
   }
 
   heartbeat(sessionId: string, taskLabel?: string): SessionRecord {

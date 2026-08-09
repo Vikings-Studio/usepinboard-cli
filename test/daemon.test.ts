@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { DaemonClient } from "../src/daemon/client.js";
 import { stopBackgroundDaemon } from "../src/daemon/lifecycle.js";
 import { startDaemon } from "../src/daemon/server.js";
-import type { MessageRecord, SessionRecord } from "../src/domain/types.js";
+import type { MessageRecord, SessionRegistration } from "../src/domain/types.js";
 import { temporaryPaths } from "./helpers.js";
 import { readLocalSecret } from "../src/security/local-auth.js";
 
@@ -42,22 +42,30 @@ describe("daemon IPC", () => {
 
       const client = new DaemonClient(paths);
       const repository = { identity: "local:daemon", name: "daemon", root: "/tmp/daemon", branch: "main" };
-      const recipient = await client.post<SessionRecord>("/v1/sessions", {
+      const recipientRegistration = await client.post<SessionRegistration>("/v1/sessions", {
         id: randomUUID(),
         provider: "claude-code",
         repository,
       });
-      const sender = await client.post<SessionRecord>("/v1/sessions", {
+      const senderRegistration = await client.post<SessionRegistration>("/v1/sessions", {
         id: randomUUID(),
         provider: "codex",
         repository: { ...repository, branch: "feature" },
       });
+      const recipient = recipientRegistration.session;
+      const sender = senderRegistration.session;
+      await expect(
+        client.get(`/v1/inbox?sessionId=${recipient.id}&unreadOnly=true`, senderRegistration.capability),
+      ).rejects.toMatchObject({ status: 403, code: "FORBIDDEN" });
       const sent = await client.post<{ message: MessageRecord }>("/v1/messages", {
         senderSessionId: sender.id,
         to: recipient.address,
         body: "hello",
-      });
-      const inbox = await client.get<MessageRecord[]>(`/v1/inbox?sessionId=${recipient.id}&unreadOnly=true`);
+      }, senderRegistration.capability);
+      const inbox = await client.get<MessageRecord[]>(
+        `/v1/inbox?sessionId=${recipient.id}&unreadOnly=true`,
+        recipientRegistration.capability,
+      );
       expect(inbox[0]?.id).toBe(sent.message.id);
       expect(await client.get("/health")).toEqual({ ok: true, version: "test" });
     } finally {
