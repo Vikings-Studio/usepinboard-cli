@@ -183,6 +183,16 @@ daemon
     await new Promise(() => undefined);
   });
 
+const session = program.command("session").description("Manage one local agent session");
+session
+  .command("end")
+  .requiredOption("--id <session-id>")
+  .action(async (options: { id: string }) => {
+    const client = await ensureStarted();
+    await client.post(`/v1/sessions/${options.id}/end`, {}, sessionCapability());
+    success(`Session ${options.id} ended`);
+  });
+
 program
   .command("who")
   .description("List active coding-agent sessions")

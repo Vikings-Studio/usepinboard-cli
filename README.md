@@ -81,6 +81,7 @@ pinboard init [--dry-run] [--configure]
 pinboard doctor [--json]
 pinboard status [--json]
 pinboard daemon start|stop|restart|status|run
+pinboard session end --id <session-id>
 pinboard who [--repo <identity>] [--branch <branch>]
 pinboard send <address> <message>
 pinboard inbox --session <id> [--unread-only] [--limit <n>]

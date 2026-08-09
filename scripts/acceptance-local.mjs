@@ -85,8 +85,22 @@ try {
 
   const inbox = runJson(["inbox", "--session", claude.id, "--unread-only", "--json"], root, claudeEnvironment);
   if (inbox.length !== 1 || inbox[0]?.id !== first.message.id) throw new Error("Recipient inbox delivery failed");
+  const reply = runJson([
+    "send",
+    codex.id,
+    "The billing contract is confirmed.",
+    "--from-session",
+    claude.id,
+    "--thread",
+    first.message.threadId,
+    "--idempotency-key",
+    randomUUID(),
+    "--json",
+  ], root, claudeEnvironment);
+  const replyInbox = runJson(["inbox", "--session", codex.id, "--unread-only", "--json"], root, codexEnvironment);
+  if (replyInbox.length !== 1 || replyInbox[0]?.id !== reply.message.id) throw new Error("Same-thread reply failed");
   const threads = runJson(["threads", "--session", claude.id, "--json"], root, claudeEnvironment);
-  if (threads.length !== 1 || threads[0]?.id !== first.message.threadId) {
+  if (threads.length !== 1 || threads[0]?.id !== first.message.threadId || threads[0]?.messageCount !== 2) {
     throw new Error("Durable conversation history failed");
   }
 
@@ -101,11 +115,19 @@ try {
     "acceptance",
     "--json",
   ], root, claudeEnvironment);
+  const statusWithLease = runJson(["status", "--json"]);
+  if (statusWithLease.status?.activeLeases !== 1) throw new Error("Lease did not appear in daemon discovery state");
   run(["release", lease.id, "--session", claude.id], root, claudeEnvironment);
 
   const status = runJson(["status", "--json"]);
   if (status.status?.sessions?.active < 2) throw new Error("Daemon status lost an active acceptance session");
-  process.stdout.write("Pinboard local acceptance passed: presence, idempotent messaging, inbox, history, and leases.\n");
+  run(["session", "end", "--id", claude.id], root, claudeEnvironment);
+  run(["session", "end", "--id", codex.id], root, codexEnvironment);
+  const endedPresence = runJson(["who", "--repo", claude.repositoryIdentity, "--include-idle", "--json"]);
+  if (endedPresence.some((candidate) => candidate.id === claude.id || candidate.id === codex.id)) {
+    throw new Error("Ended sessions remained discoverable");
+  }
+  process.stdout.write("Pinboard local acceptance passed: presence, idempotent messaging, reply, history, leases, and end signals.\n");
 } finally {
   try {
     run(["daemon", "stop"]);
