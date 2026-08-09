@@ -25,13 +25,17 @@ import {
   stopUserService,
   userServiceStatus,
 } from "./platform/service.js";
-import { parseConfigKey, readConfig, setCloudConfig, setConfig } from "./config/settings.js";
+import { parseConfigKey, readConfig, setAuthConfig, setCloudConfig, setConfig } from "./config/settings.js";
 import { runtimeSupported } from "./platform/runtime.js";
 import { readOrCreateLocalSecret } from "./security/local-auth.js";
 import { formatUntrusted, sanitizeUntrustedText, truncateUtf8 } from "./security/untrusted.js";
 import { heading, line, printJson, success, warning } from "./cli/output.js";
 import { readCloudCredential, removeCloudCredential, validateStaticToken, writeCloudCredential } from "./cloud/credentials.js";
 import { normalizeCloudApiUrl, SpikeClient } from "./cloud/client.js";
+import { createCredentialStore } from "./auth/credential-store.js";
+import { openBrowser } from "./auth/browser.js";
+import { DEFAULT_API_URL, DEVICE_AUTH_ACCOUNT, DEVICE_AUTH_SERVICE } from "./constants.js";
+import { currentPlatform, generateDeviceId, normalizeApiUrl, runDeviceLogin } from "./auth/device-auth.js";
 
 const require = createRequire(import.meta.url);
 const packageJson = require("../package.json") as { version: string };
@@ -585,6 +589,79 @@ cloud
     await setCloudConfig(paths, { ...current.cloud, enabled: false, syncPaused: false });
     await removeCloudCredential(paths);
     success("Disconnected the experimental Teams relay. Personal data and local messaging were preserved.");
+  });
+
+const auth = program.command("auth").description("Authenticate this device with Pinboard Cloud using the device authorization flow");
+auth
+  .command("login")
+  .description("Start a device authorization and store the access token in the OS credential store")
+  .option("--api <url>", `Pinboard API base URL (default: ${DEFAULT_API_URL})`)
+  .option("--no-browser", "print the verification URL instead of opening the browser")
+  .action(async (options: { api?: string; browser: boolean }) => {
+    const paths = getPaths();
+    if (options.api !== undefined && options.api.length === 0) throw new Error("--api must be a non-empty https URL");
+    const apiUrl = normalizeApiUrl(options.api ?? DEFAULT_API_URL);
+    const config = await readConfig(paths);
+    const deviceId = config.auth.deviceId ?? generateDeviceId();
+    const credentialStore = createCredentialStore();
+    const result = await runDeviceLogin({
+      apiUrl,
+      deviceId,
+      deviceName: "pinboard-cli",
+      platform: currentPlatform(),
+      credentialStore,
+      ...(options.browser ? { openBrowser } : {}),
+      onShow: (verificationUrl, userCode) => {
+        heading("Pinboard device authorization");
+        line(`Open this URL in a browser and enter the code:`);
+        line();
+        line(`  ${pc.cyan(verificationUrl)}`);
+        line();
+        line(`Your code: ${pc.bold(userCode)}`);
+        line();
+        line("Waiting for approval…");
+      },
+    });
+    await ensureDirectories(paths);
+    // Persist the server-returned device id so the stored config matches
+    // the device grant the token is bound to, rather than the value we
+    // happened to send (which may have been a freshly generated one).
+    await setAuthConfig(paths, { deviceId: result.deviceId });
+    success(`Authenticated as organization ${result.organizationId}, user ${result.userId}`);
+    line(`Device ${result.deviceId} is authorized for scope: ${result.scope}`);
+    line("The access token is stored in your OS credential store and is never printed.");
+  });
+auth
+  .command("status")
+  .description("Show whether this device has a stored access token")
+  .option("--json", "print machine-readable output")
+  .action(async (options: { json?: boolean }) => {
+    const paths = getPaths();
+    const config = await readConfig(paths);
+    let token: string | null = null;
+    let error: string | null = null;
+    try {
+      token = await createCredentialStore().read(DEVICE_AUTH_SERVICE, DEVICE_AUTH_ACCOUNT);
+    } catch (failure) {
+      error = failure instanceof Error ? failure.message : String(failure);
+    }
+    const report = {
+      authenticated: token !== null,
+      deviceId: config.auth.deviceId,
+      credentialStore: error ? { error } : { available: true },
+    };
+    if (options.json) printJson(report);
+    else if (token) success(`Authenticated${config.auth.deviceId ? ` as device ${config.auth.deviceId}` : ""}`);
+    else if (error) warning(`Not authenticated. Credential store unavailable: ${error}`);
+    else line("Not authenticated. Run `pinboard auth login`.");
+  });
+auth
+  .command("logout")
+  .description("Remove the stored access token from the OS credential store")
+  .action(async () => {
+    const credentialStore = createCredentialStore();
+    await credentialStore.delete(DEVICE_AUTH_SERVICE, DEVICE_AUTH_ACCOUNT);
+    success("Removed the stored access token. Server-side revocation is not performed by this command.");
   });
 
 const sync = program.command("sync").description("EXPERIMENTAL: synchronize the Teams relay once or control synchronization");

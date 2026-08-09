@@ -96,7 +96,7 @@ describe("experimental cloud synchronization", () => {
       version: 2,
       idleMinutes: 5,
       staleMinutes: 30,
-      cloud: { enabled: true, apiUrl, organizationId: "org_1", userId: "user_1", deviceId: "device_1", syncPaused: false },
+      cloud: { enabled: true, apiUrl, organizationId: "org_1", userId: "user_1", deviceId: "device_1", syncPaused: false }, auth: { deviceId: null },
     };
     const client = new SpikeClient(apiUrl, "design_partner_token_0123456789");
     const first = await syncCloudOnce({ database, config, token: "unused_but_valid_000", client });
@@ -161,7 +161,7 @@ describe("experimental cloud synchronization", () => {
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("test relay did not bind");
     const apiUrl = `http://127.0.0.1:${address.port}`;
-    const config: PinboardConfig = { version: 2, idleMinutes: 5, staleMinutes: 30, cloud: { enabled: true, apiUrl, organizationId: "org_1", userId: "user_1", deviceId: "device_1", syncPaused: false } };
+    const config: PinboardConfig = { version: 2, idleMinutes: 5, staleMinutes: 30, cloud: { enabled: true, apiUrl, organizationId: "org_1", userId: "user_1", deviceId: "device_1", syncPaused: false }, auth: { deviceId: null } };
     try {
       const result = await syncCloudOnce({ database, config, token: "design_partner_token_0123456789" });
       expect(result).toMatchObject({ sessionsFailed: 1, messagesSent: 1, messagesFailed: 0 });
@@ -226,7 +226,7 @@ describe("experimental cloud synchronization", () => {
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("test relay did not bind");
     const apiUrl = `http://127.0.0.1:${address.port}`;
-    const config: PinboardConfig = { version: 2, idleMinutes: 5, staleMinutes: 30, cloud: { enabled: true, apiUrl, organizationId: "org_1", userId: "user_1", deviceId: "device_1", syncPaused: false } };
+    const config: PinboardConfig = { version: 2, idleMinutes: 5, staleMinutes: 30, cloud: { enabled: true, apiUrl, organizationId: "org_1", userId: "user_1", deviceId: "device_1", syncPaused: false }, auth: { deviceId: null } };
     try {
       const retry = await syncCloudOnce({ database, config, token: "design_partner_token_0123456789" });
       expect(retry).toMatchObject({ receiptsSent: 0, receiptsFailed: 1 });

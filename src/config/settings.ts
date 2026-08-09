@@ -9,6 +9,11 @@ export interface PinboardConfig {
   idleMinutes: number;
   staleMinutes: number;
   cloud: CloudConfig;
+  auth: AuthConfig;
+}
+
+export interface AuthConfig {
+  deviceId: string | null;
 }
 
 export interface CloudConfig {
@@ -34,6 +39,9 @@ export const DEFAULT_CONFIG: PinboardConfig = {
     deviceId: null,
     syncPaused: false,
   },
+  auth: {
+    deviceId: null,
+  },
 };
 
 function validate(value: unknown): PinboardConfig {
@@ -52,6 +60,9 @@ function validate(value: unknown): PinboardConfig {
   const rawCloud = input.version === 2 && input.cloud && typeof input.cloud === "object" && !Array.isArray(input.cloud)
     ? input.cloud as Record<string, unknown>
     : {};
+  const rawAuth = input.version === 2 && input.auth && typeof input.auth === "object" && !Array.isArray(input.auth)
+    ? input.auth as Record<string, unknown>
+    : {};
   const nullableString = (key: string): string | null => {
     const item = rawCloud[key];
     if (item === undefined || item === null) return null;
@@ -69,6 +80,14 @@ function validate(value: unknown): PinboardConfig {
     const identifier = nullableString(key);
     if (identifier !== null && !isCloudIdentifier(identifier)) throw new Error(`cloud.${key} must be a stable 1-128 character identifier or null`);
   }
+  const authDeviceId = rawAuth.deviceId === undefined || rawAuth.deviceId === null
+    ? null
+    : (() => {
+      if (typeof rawAuth.deviceId !== "string" || rawAuth.deviceId.length === 0 || rawAuth.deviceId.length > 128) {
+        throw new Error("auth.deviceId must be a non-empty string or null");
+      }
+      return rawAuth.deviceId;
+    })();
   return {
     version: 2,
     idleMinutes,
@@ -80,6 +99,9 @@ function validate(value: unknown): PinboardConfig {
       userId: nullableString("userId"),
       deviceId: nullableString("deviceId"),
       syncPaused: rawCloud.syncPaused === true,
+    },
+    auth: {
+      deviceId: authDeviceId,
     },
   };
 }
@@ -118,6 +140,13 @@ export async function setConfig(paths: PinboardPaths, key: ConfigKey, rawValue: 
 export async function setCloudConfig(paths: PinboardPaths, cloud: CloudConfig): Promise<PinboardConfig> {
   const current = await readConfig(paths);
   const next = validate({ ...current, version: 2, cloud });
+  await writeConfig(paths, next);
+  return next;
+}
+
+export async function setAuthConfig(paths: PinboardPaths, auth: AuthConfig): Promise<PinboardConfig> {
+  const current = await readConfig(paths);
+  const next = validate({ ...current, version: 2, auth });
   await writeConfig(paths, next);
   return next;
 }

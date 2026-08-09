@@ -88,6 +88,7 @@ pinboard status [--json]
 pinboard daemon start|stop|restart|status|run
 pinboard service install|uninstall|start|stop|restart|status
 pinboard integrations list|install|remove|doctor
+pinboard auth login [--api <https-url>] [--no-browser]|status|logout
 pinboard cloud connect --api <https-url>|status|disconnect
 pinboard sync now|status|pause|resume
 pinboard repo link --repository-id <allowed-id>|status|list|unlink
@@ -106,6 +107,18 @@ pinboard purge --confirm delete-local-data
 pinboard update [--dry-run]
 pinboard uninstall [--purge-data --confirm delete-local-data]
 ```
+
+## Device authentication
+
+`pinboard auth login` authenticates this device with Pinboard Cloud using the RFC 8628-style device authorization grant. It never handles a browser session cookie: the CLI starts a request, prints a short human-typable code and a verification URL (opening the default browser unless `--no-browser`), and polls until the human approves. The issued scoped access token is stored in the OS credential store (macOS Keychain or the Linux Secret Service) and is never printed, logged, or persisted in plaintext config.
+
+```bash
+pinboard auth login
+pinboard auth status
+pinboard auth logout
+```
+
+The API base defaults to `https://api.usepinboard.com` and can be overridden with `--api <https-url>`. Only HTTPS is accepted except loopback HTTP used by tests. `pinboard auth logout` removes the local token; it does not claim server-side revocation. On platforms without a secure credential store the CLI fails closed with an actionable error rather than falling back to plaintext token persistence.
 
 ## Experimental Teams validation relay
 
