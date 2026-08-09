@@ -119,7 +119,7 @@ pinboard auth status
 pinboard auth logout
 ```
 
-The API base defaults to `https://api.usepinboard.com` and can be overridden with `--api <https-url>`. Only HTTPS is accepted except loopback HTTP used by tests. `pinboard auth login` preserves any previously stored access token: if the Cloud connection activation fails, the prior token is restored, otherwise the newly issued token is removed. `pinboard auth logout` removes the local token; it does not claim server-side revocation. On platforms without a secure credential store the CLI fails closed with an actionable error rather than falling back to plaintext token persistence.
+The API base currently defaults to `https://pinboard-backend-4p35sr23vq-uc.a.run.app` (the current hosted endpoint until the custom API domain is configured) and can be overridden with `--api <https-url>`. Only HTTPS is accepted except loopback HTTP used by tests. `pinboard auth login` preserves any previously stored access token: if the Cloud connection activation fails, the prior token is restored, otherwise the newly issued token is removed. `pinboard auth logout` removes the local token; it does not claim server-side revocation. On platforms without a secure credential store the CLI fails closed with an actionable error rather than falling back to plaintext token persistence.
 
 ## Teams: repository links and synchronization
 

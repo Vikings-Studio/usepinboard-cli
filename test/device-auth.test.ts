@@ -81,13 +81,13 @@ describe("device auth client", () => {
     expect(() => normalizeApiUrl("http://api.example.test")).toThrow(/HTTPS/u);
     expect(() => normalizeApiUrl("https://user:pass@api.example.test")).toThrow(/credentials/u);
     expect(normalizeApiUrl("http://127.0.0.1:8080/")).toBe("http://127.0.0.1:8080");
-    expect(normalizeApiUrl("https://api.usepinboard.com/")).toBe("https://api.usepinboard.com");
+    expect(normalizeApiUrl("https://pinboard-backend-4p35sr23vq-uc.a.run.app/")).toBe("https://pinboard-backend-4p35sr23vq-uc.a.run.app");
   });
 
   it("resolves a same-origin verification path against the API origin", () => {
-    expect(resolveVerificationUrl("https://api.usepinboard.com", "/device")).toBe("https://api.usepinboard.com/device");
-    expect(resolveVerificationUrl("https://api.usepinboard.com", "https://usepinboard.com/device")).toBe("https://usepinboard.com/device");
-    expect(() => resolveVerificationUrl("https://api.usepinboard.com", "//evil.test")).toThrow(/invalid verification URL/u);
+    expect(resolveVerificationUrl("https://pinboard-backend-4p35sr23vq-uc.a.run.app", "/device")).toBe("https://pinboard-backend-4p35sr23vq-uc.a.run.app/device");
+    expect(resolveVerificationUrl("https://pinboard-backend-4p35sr23vq-uc.a.run.app", "https://usepinboard.com/device")).toBe("https://usepinboard.com/device");
+    expect(() => resolveVerificationUrl("https://pinboard-backend-4p35sr23vq-uc.a.run.app", "//evil.test")).toThrow(/invalid verification URL/u);
   });
 });
 
@@ -111,7 +111,7 @@ describe("device login flow", () => {
       return Promise.resolve(response);
     };
     const result = await runDeviceLogin({
-      apiUrl: "https://api.usepinboard.com",
+      apiUrl: "https://pinboard-backend-4p35sr23vq-uc.a.run.app",
       deviceId: "device_1",
       credentialStore: store,
       fetchImpl,
@@ -120,7 +120,7 @@ describe("device login flow", () => {
       openBrowser: () => Promise.resolve((opened += 1, true)),
       onShow: (url, code) => { shown.push({ url, code }); },
     });
-    expect(shown[0]).toEqual({ url: "https://api.usepinboard.com/device", code: "ABCD-EFGH" });
+    expect(shown[0]).toEqual({ url: "https://pinboard-backend-4p35sr23vq-uc.a.run.app/device", code: "ABCD-EFGH" });
     expect(opened).toBe(1);
     expect(polls).toBe(1);
     expect(sleep.slept).toEqual([5000]);
@@ -144,7 +144,7 @@ describe("device login flow", () => {
       return Promise.resolve(response);
     };
     const result = await runDeviceLogin({
-      apiUrl: "https://api.usepinboard.com",
+      apiUrl: "https://pinboard-backend-4p35sr23vq-uc.a.run.app",
       deviceId: "device_1",
       credentialStore: store,
       fetchImpl,
@@ -169,7 +169,7 @@ describe("device login flow", () => {
       return Promise.resolve(response);
     };
     await expect(runDeviceLogin({
-      apiUrl: "https://api.usepinboard.com",
+      apiUrl: "https://pinboard-backend-4p35sr23vq-uc.a.run.app",
       deviceId: "device_1",
       credentialStore: store,
       fetchImpl,
@@ -193,7 +193,7 @@ describe("device login flow", () => {
       return Promise.resolve(response);
     };
     await expect(runDeviceLogin({
-      apiUrl: "https://api.usepinboard.com",
+      apiUrl: "https://pinboard-backend-4p35sr23vq-uc.a.run.app",
       deviceId: "device_1",
       credentialStore: store,
       fetchImpl,
@@ -217,7 +217,7 @@ describe("device login flow", () => {
       return Promise.resolve(response);
     };
     await expect(runDeviceLogin({
-      apiUrl: "https://api.usepinboard.com",
+      apiUrl: "https://pinboard-backend-4p35sr23vq-uc.a.run.app",
       deviceId: "device_1",
       credentialStore: store,
       fetchImpl,
@@ -242,7 +242,7 @@ describe("device login flow", () => {
       return Promise.resolve(response);
     };
     const promise = runDeviceLogin({
-      apiUrl: "https://api.usepinboard.com",
+      apiUrl: "https://pinboard-backend-4p35sr23vq-uc.a.run.app",
       deviceId: "device_1",
       credentialStore: store,
       fetchImpl,
@@ -267,7 +267,7 @@ describe("device login flow", () => {
       return Promise.resolve(jsonResponse(200, tokenData()));
     };
     const result = await runDeviceLogin({
-      apiUrl: "https://api.usepinboard.com",
+      apiUrl: "https://pinboard-backend-4p35sr23vq-uc.a.run.app",
       deviceId: "device_1",
       credentialStore: store,
       fetchImpl,
@@ -293,7 +293,7 @@ describe("device login flow", () => {
       return Promise.resolve(response);
     };
     const result = await runDeviceLogin({
-      apiUrl: "https://api.usepinboard.com",
+      apiUrl: "https://pinboard-backend-4p35sr23vq-uc.a.run.app",
       deviceId: "device_1",
       credentialStore: store,
       fetchImpl,
@@ -322,7 +322,7 @@ describe("device login flow", () => {
       return Promise.resolve(response);
     };
     await expect(runDeviceLogin({
-      apiUrl: "https://api.usepinboard.com",
+      apiUrl: "https://pinboard-backend-4p35sr23vq-uc.a.run.app",
       deviceId: "device_1",
       credentialStore: store,
       fetchImpl,
@@ -345,7 +345,7 @@ describe("device login flow", () => {
       return Promise.resolve(response);
     };
     const error = await runDeviceLogin({
-      apiUrl: "https://api.usepinboard.com",
+      apiUrl: "https://pinboard-backend-4p35sr23vq-uc.a.run.app",
       deviceId: "device_1",
       credentialStore: store,
       fetchImpl,
@@ -370,7 +370,7 @@ describe("device login flow", () => {
       return Promise.resolve(response);
     };
     await runDeviceLogin({
-      apiUrl: "https://api.usepinboard.com",
+      apiUrl: "https://pinboard-backend-4p35sr23vq-uc.a.run.app",
       deviceId: "device_1",
       credentialStore: store,
       fetchImpl,
@@ -381,7 +381,7 @@ describe("device login flow", () => {
     });
     // onShow is invoked exactly once even when openBrowser returns false.
     expect(shown).toHaveLength(1);
-    expect(shown[0]).toEqual({ url: "https://api.usepinboard.com/device", code: "ABCD-EFGH" });
+    expect(shown[0]).toEqual({ url: "https://pinboard-backend-4p35sr23vq-uc.a.run.app/device", code: "ABCD-EFGH" });
   });
 
   it("returns the server-authoritative deviceId from the token response", async () => {
@@ -398,7 +398,7 @@ describe("device login flow", () => {
       return Promise.resolve(response);
     };
     const result = await runDeviceLogin({
-      apiUrl: "https://api.usepinboard.com",
+      apiUrl: "https://pinboard-backend-4p35sr23vq-uc.a.run.app",
       deviceId: "client_sent_id",
       credentialStore: store,
       fetchImpl,
@@ -464,7 +464,7 @@ describe("retry-after parsing and cap", () => {
       return Promise.resolve(response);
     };
     const result = await runDeviceLogin({
-      apiUrl: "https://api.usepinboard.com",
+      apiUrl: "https://pinboard-backend-4p35sr23vq-uc.a.run.app",
       deviceId: "device_1",
       credentialStore: store,
       fetchImpl,

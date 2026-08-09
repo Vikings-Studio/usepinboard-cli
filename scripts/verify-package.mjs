@@ -15,4 +15,12 @@ if (unexpected.length > 0) throw new Error(`Unexpected files in npm artifact: ${
 
 const suspicious = files.filter((file) => /(?:^|\/)(?:\.env|.*\.sqlite3?|.*\.pem|.*\.key|pinboardd\.log)$/iu.test(file));
 if (suspicious.length > 0) throw new Error(`Sensitive-looking files in npm artifact: ${suspicious.join(", ")}`);
-process.stdout.write(`Verified ${files.length} packaged files against the public allowlist.\n`);
+
+// A publish or pack without a prior build would ship a tarball that only
+// contains metadata (README, LICENSE, package.json) and no runnable CLI.
+// The allowlist above cannot detect that, so require the compiled entrypoint
+// and at least one real module to be present.
+const compiled = files.filter((file) => file.startsWith("dist/"));
+if (compiled.length === 0) throw new Error("npm artifact contains no compiled dist/ output; the CLI would be unusable");
+if (!files.includes("dist/cli.js")) throw new Error("npm artifact is missing the dist/cli.js entrypoint");
+process.stdout.write(`Verified ${files.length} packaged files against the public allowlist (${compiled.length} compiled).\n`);

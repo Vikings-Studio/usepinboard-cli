@@ -23,7 +23,8 @@
     "test:watch": "vitest",
     "check": "npm run typecheck && npm run lint && npm test && npm run build",
     "pack:check": "npm pack --dry-run",
-    "pack:verify": "node scripts/verify-package.mjs"
+    "pack:verify": "node scripts/verify-package.mjs",
+    "prepack": "npm run build"
   },
   "engines": {
     "node": ">=24.15.0"
