@@ -17,7 +17,7 @@ export function validateStaticToken(value: string): string {
     if (code <= 0x20 || code >= 0x7f) unsafe = true;
   }
   if (token.length < 16 || token.length > 4096 || unsafe) {
-    throw new Error("The design-partner token is invalid");
+    throw new Error("The static token is invalid");
   }
   return token;
 }
@@ -30,7 +30,7 @@ async function assertSafeCredentialFile(path: string): Promise<void> {
 }
 
 export async function writeCloudCredential(paths: PinboardPaths, rawToken: string): Promise<void> {
-  if (platform() === "win32") throw new Error("Experimental Teams relay credentials are unavailable on Windows; Personal remains supported");
+  if (platform() === "win32") throw new Error("Cloud relay credentials are unavailable on Windows; Personal remains supported");
   const token = validateStaticToken(rawToken);
   await mkdir(dirname(paths.cloudCredentials), { recursive: true, mode: 0o700 });
   try {
@@ -74,7 +74,7 @@ export async function writeCloudCredential(paths: PinboardPaths, rawToken: strin
 }
 
 export async function readCloudCredential(paths: PinboardPaths): Promise<string> {
-  if (platform() === "win32") throw new Error("Experimental Teams relay credentials are unavailable on Windows; Personal remains supported");
+  if (platform() === "win32") throw new Error("Cloud relay credentials are unavailable on Windows; Personal remains supported");
   try {
     await assertSafeCredentialFile(paths.cloudCredentials);
     const parsed = JSON.parse(await readFile(paths.cloudCredentials, "utf8")) as Partial<StoredCredential>;

@@ -274,6 +274,21 @@ export async function runDeviceLogin(options: DeviceLoginOptions): Promise<Devic
   }
 }
 
+// Roll back the OS credential store after a failed device login. The
+// device authorization flow overwrites any previously stored token
+// before local cloud activation completes; restore that prior token
+// when one existed, otherwise remove the newly stored token.
+export async function restoreDeviceCredential(
+  credentialStore: CredentialStore,
+  previousToken: string | null,
+): Promise<void> {
+  if (previousToken !== null) {
+    await credentialStore.save(DEVICE_AUTH_SERVICE, DEVICE_AUTH_ACCOUNT, previousToken);
+  } else {
+    await credentialStore.delete(DEVICE_AUTH_SERVICE, DEVICE_AUTH_ACCOUNT);
+  }
+}
+
 export function generateDeviceId(): string {
   return `cli-${randomUUID()}`;
 }

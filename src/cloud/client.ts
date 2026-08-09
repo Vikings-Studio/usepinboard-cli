@@ -1,15 +1,18 @@
 import { PROTOCOL_VERSION } from "../constants.js";
 import { PROTOCOL_VERSION_HEADER } from "../protocol/version.js";
 import { sanitizeUntrustedText, truncateUtf8 } from "../security/untrusted.js";
-import { isCloudIdentifier } from "./identifiers.js";
+import { isCloudIdentifier, requireCloudIdentifier } from "./identifiers.js";
 
-export interface SpikeBootstrap {
+export interface RelayBootstrap {
   organizationId: string;
   userId: string;
   deviceId: string;
   repositoryIds: string[];
   protocolVersion: number;
 }
+
+/** @deprecated Use RelayBootstrap instead */
+export type SpikeBootstrap = RelayBootstrap;
 
 export class CloudClientError extends Error {
   readonly code: string;
@@ -36,7 +39,7 @@ export function normalizeCloudApiUrl(raw: string): string {
   return url.toString().replace(/\/+$/u, "");
 }
 
-export class SpikeClient {
+export class RelayClient {
   readonly apiUrl: string;
   readonly token: string;
 
@@ -45,18 +48,37 @@ export class SpikeClient {
     this.token = token;
   }
 
-  async bootstrap(): Promise<SpikeBootstrap> {
-    const value = await this.call<unknown>("GET", "/v1/spike/bootstrap");
+  async bootstrap(): Promise<RelayBootstrap> {
+    const value = await this.call<unknown>("GET", "/v1/bootstrap");
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Relay bootstrap response is incompatible with this CLI");
     const data = (value as { data?: unknown }).data;
     if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Relay bootstrap response is incompatible with this CLI");
-    const bootstrap = data as Partial<SpikeBootstrap>;
+    const bootstrap = data as Partial<RelayBootstrap>;
     if (bootstrap.protocolVersion !== PROTOCOL_VERSION || !Array.isArray(bootstrap.repositoryIds)
       || !bootstrap.repositoryIds.every(isCloudIdentifier)
       || !isCloudIdentifier(bootstrap.organizationId) || !isCloudIdentifier(bootstrap.userId) || !isCloudIdentifier(bootstrap.deviceId)) {
       throw new Error("Relay bootstrap response is incompatible with this CLI");
     }
-    return bootstrap as SpikeBootstrap;
+    return bootstrap as RelayBootstrap;
+  }
+
+  async linkRepository(repositoryId: string, repositoryIdentity: string, repositoryName: string): Promise<void> {
+    requireCloudIdentifier(repositoryId, "repositoryId");
+    await this.call<unknown>("POST", "/v1/repositories/link", { repositoryId, repositoryIdentity, repositoryName }, repositoryId);
+  }
+
+  async listRepositories(): Promise<Array<{ id: string; identity: string; name: string }>> {
+    const value = await this.call<unknown>("GET", "/v1/repositories");
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Relay repository list response is incompatible with this CLI");
+    const data = (value as { data?: unknown }).data;
+    if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Relay repository list response is incompatible with this CLI");
+    const repositories = (data as { repositories?: unknown }).repositories;
+    if (!Array.isArray(repositories) || !repositories.every((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+      const repository = item as { id?: unknown; identity?: unknown; name?: unknown };
+      return typeof repository.id === "string" && typeof repository.identity === "string" && typeof repository.name === "string";
+    })) throw new Error("Relay repository list response is incompatible with this CLI");
+    return repositories as Array<{ id: string; identity: string; name: string }>;
   }
 
   async get<T>(path: string): Promise<T> {
@@ -118,3 +140,6 @@ export class SpikeClient {
     return parsed as T;
   }
 }
+
+/** @deprecated Use RelayClient instead */
+export const SpikeClient = RelayClient;

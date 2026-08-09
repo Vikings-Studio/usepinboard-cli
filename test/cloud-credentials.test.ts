@@ -10,7 +10,7 @@ describe("cloud credential file", () => {
   it("stores a token restrictively without exposing it through config", async () => {
     const paths = await temporaryPaths();
     cleanup.push(paths.dataDir);
-    const token = "design_partner_token_0123456789";
+    const token = "relay_token_0123456789";
     if (process.platform === "win32") {
       await expect(writeCloudCredential(paths, token)).rejects.toThrow(/unavailable on Windows; Personal remains supported/u);
       return;
@@ -27,7 +27,7 @@ describe("cloud credential file", () => {
     if (process.platform === "win32") return;
     const paths = await temporaryPaths();
     cleanup.push(paths.dataDir);
-    await writeCloudCredential(paths, "design_partner_token_0123456789");
+    await writeCloudCredential(paths, "relay_token_0123456789");
     await chmod(paths.cloudCredentials, 0o644);
     await expect(readCloudCredential(paths)).rejects.toThrow(/permissions/u);
     await rm(paths.cloudCredentials);

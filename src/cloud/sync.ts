@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { PinboardConfig } from "../config/settings.js";
 import type { SessionRecord } from "../domain/types.js";
 import type { PinboardDatabase } from "../storage/database.js";
-import { CloudClientError, SpikeClient } from "./client.js";
+import { CloudClientError, RelayClient } from "./client.js";
 import { isCloudResourceId } from "./identifiers.js";
 
 export interface CloudSyncResult {
@@ -73,12 +73,12 @@ export async function syncCloudOnce(input: {
   database: PinboardDatabase;
   config: PinboardConfig;
   token: string;
-  client?: SpikeClient;
+  client?: RelayClient;
 }): Promise<CloudSyncResult> {
   const cloud = input.config.cloud;
   if (!cloud.enabled || !cloud.apiUrl || !cloud.organizationId) throw new Error("Pinboard Cloud is not connected");
   if (cloud.syncPaused) throw new Error("Cloud sync is paused. Run `pinboard sync resume` first.");
-  const client = input.client ?? new SpikeClient(cloud.apiUrl, input.token);
+  const client = input.client ?? new RelayClient(cloud.apiUrl, input.token);
   const bootstrap = await client.bootstrap();
   if (bootstrap.organizationId !== cloud.organizationId || bootstrap.userId !== cloud.userId || bootstrap.deviceId !== cloud.deviceId) {
     throw new Error("Relay identity no longer matches the configured cloud connection");
@@ -100,7 +100,7 @@ export async function syncCloudOnce(input: {
       let cloudSessionId = existingLink?.cloudSessionId ?? null;
       if (session.state === "ended" || session.state === "stale") {
         if (cloudSessionId && existingLink?.lastState !== session.state) {
-          await client.post(`/v1/spike/sessions/${encodeURIComponent(cloudSessionId)}/end`, {}, randomUUID());
+          await client.post(`/v1/sessions/${encodeURIComponent(cloudSessionId)}/end`, {}, randomUUID());
           input.database.upsertCloudSession(cloud.organizationId, session.id, cloudSessionId, session.state);
           sessionsEnded += 1;
         }
@@ -108,7 +108,7 @@ export async function syncCloudOnce(input: {
       }
       if (!cloudSessionId) {
         const response = await client.post<{ data: { session: { id: string } } }>(
-          "/v1/spike/sessions",
+          "/v1/sessions",
           sessionBody(session, link.repositoryId),
           session.id,
         );
@@ -117,23 +117,23 @@ export async function syncCloudOnce(input: {
         input.database.upsertCloudSession(cloud.organizationId, session.id, cloudSessionId, session.state);
       } else {
         await client.patch(
-          `/v1/spike/sessions/${encodeURIComponent(cloudSessionId)}/presence`,
+          `/v1/sessions/${encodeURIComponent(cloudSessionId)}/presence`,
           session.taskLabel ? { taskLabel: session.taskLabel } : {},
           randomUUID(),
         );
         input.database.upsertCloudSession(cloud.organizationId, session.id, cloudSessionId, session.state);
       }
       sessionsPushed += 1;
-      // The spike API cursor paginates a descending snapshot; it is not an
+      // The relay API cursor paginates a descending snapshot; it is not an
       // incremental high-water mark. Always restart at page one so newly-created
       // messages cannot be skipped, and rely on the durable remote-id constraint
       // for deduplication across runs.
       let cursor: string | null = null;
       const visited = new Set<string>();
       for (let page = 0; page < 20; page += 1) {
-        const query = new URLSearchParams({ repository_id: link.repositoryId, session_id: cloudSessionId, limit: "100" });
+        const query = new URLSearchParams({ repositoryId: link.repositoryId, sessionId: cloudSessionId, limit: "100" });
         if (cursor) query.set("cursor", cursor);
-        const inbox = parseInbox(await client.get<unknown>(`/v1/spike/messages/inbox?${query.toString()}`));
+        const inbox = parseInbox(await client.get<unknown>(`/v1/messages/inbox?${query.toString()}`));
         messagesReceived += input.database.ingestCloudInbox({
           organizationId: cloud.organizationId,
           repositoryId: link.repositoryId,
@@ -164,7 +164,7 @@ export async function syncCloudOnce(input: {
       if (!localThreadId) throw new Error("Cloud outbox message is missing its local thread mapping");
       const { localThreadId: _localThreadId, ...wirePayload } = item.payload;
       void _localThreadId;
-      const sent = parseSentMessage(await client.post("/v1/spike/messages", { ...wirePayload, senderSessionId }, item.idempotencyKey));
+      const sent = parseSentMessage(await client.post("/v1/messages", { ...wirePayload, senderSessionId }, item.idempotencyKey));
       const repositoryId = typeof item.payload.repositoryId === "string" ? item.payload.repositoryId : "";
       input.database.recordCloudThreadMapping(cloud.organizationId, repositoryId, localThreadId, sent.threadId);
       input.database.markCloudOutboxSent(item.id);
@@ -191,7 +191,7 @@ export async function syncCloudOnce(input: {
       }
       try {
         const response = await client.post(
-          `/v1/spike/messages/${encodeURIComponent(messageId)}/receipts`,
+          `/v1/messages/${encodeURIComponent(messageId)}/receipts`,
           { type, sessionId },
           item.idempotencyKey,
         );

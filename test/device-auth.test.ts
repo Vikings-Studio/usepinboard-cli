@@ -4,8 +4,10 @@ import {
   normalizeApiUrl,
   parseRetryAfter,
   resolveVerificationUrl,
+  restoreDeviceCredential,
   runDeviceLogin,
 } from "../src/auth/device-auth.js";
+import { DEVICE_AUTH_ACCOUNT, DEVICE_AUTH_SERVICE } from "../src/constants.js";
 import type { CredentialStore } from "../src/auth/credential-store.js";
 
 function jsonResponse(status: number, body: unknown, headers: Record<string, string> = {}): Response {
@@ -404,6 +406,26 @@ describe("device login flow", () => {
       now: clock.now,
     });
     expect(result.deviceId).toBe("server_bound_device_id");
+  });
+});
+
+describe("device credential rollback", () => {
+  it("restores a previously stored OS token when activation fails after a new login", async () => {
+    const store = makeStore();
+    await store.save(DEVICE_AUTH_SERVICE, DEVICE_AUTH_ACCOUNT, "prior_token_0123456789");
+    store.saved.length = 0;
+    await store.save(DEVICE_AUTH_SERVICE, DEVICE_AUTH_ACCOUNT, "new_token_0123456789");
+    await restoreDeviceCredential(store, "prior_token_0123456789");
+    expect(store.deleted).toEqual([]);
+    expect(store.saved).toEqual(["new_token_0123456789", "prior_token_0123456789"]);
+  });
+
+  it("deletes the newly stored token when no prior token existed", async () => {
+    const store = makeStore();
+    await store.save(DEVICE_AUTH_SERVICE, DEVICE_AUTH_ACCOUNT, "new_token_0123456789");
+    await restoreDeviceCredential(store, null);
+    expect(store.deleted).toEqual(["deleted"]);
+    expect(store.saved).toEqual(["new_token_0123456789"]);
   });
 });
 

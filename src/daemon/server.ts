@@ -19,9 +19,9 @@ import {
 } from "../security/session-capability.js";
 import { PinboardDatabase } from "../storage/database.js";
 import { readConfig } from "../config/settings.js";
-import { readCloudCredential } from "../cloud/credentials.js";
+import { readRelayToken } from "../cloud/token-reader.js";
 import { syncCloudOnce } from "../cloud/sync.js";
-import { SpikeClient } from "../cloud/client.js";
+import { RelayClient } from "../cloud/client.js";
 import { CLOUD_IDENTIFIER_PATTERN } from "../cloud/identifiers.js";
 
 export interface DaemonHandle {
@@ -260,7 +260,6 @@ export async function startDaemon(options: {
         const config = await readConfig(paths);
         const organizationId = config.cloud.organizationId;
         json(response, 200, {
-          experimental: true,
           config: config.cloud,
           connection: organizationId ? database.getCloudConnection(organizationId) : null,
           queue: organizationId ? database.cloudQueueStatus(organizationId) : null,
@@ -316,20 +315,20 @@ export async function startDaemon(options: {
       }
       if (method === "POST" && url.pathname === "/v1/cloud/sync") {
         const config = await readConfig(paths);
-        const token = await readCloudCredential(paths);
+        const token = await readRelayToken(paths);
         json(response, 200, await syncCloudOnce({ database, config, token }));
         return;
       }
       if (method === "POST" && url.pathname === "/v1/cloud/end-sessions") {
         const config = await readConfig(paths);
         if (!config.cloud.enabled || !config.cloud.apiUrl || !config.cloud.organizationId) throw new Error("Pinboard Cloud is not connected");
-        const relay = new SpikeClient(config.cloud.apiUrl, await readCloudCredential(paths));
+        const relay = new RelayClient(config.cloud.apiUrl, await readRelayToken(paths));
         let ended = 0;
         let failed = 0;
         for (const session of database.listCloudSessionLinks(config.cloud.organizationId)) {
           if (["ended", "stale"].includes(session.lastState)) continue;
           try {
-            await relay.post(`/v1/spike/sessions/${encodeURIComponent(session.cloudSessionId)}/end`, {}, randomUUID());
+            await relay.post(`/v1/sessions/${encodeURIComponent(session.cloudSessionId)}/end`, {}, randomUUID());
             database.upsertCloudSession(config.cloud.organizationId, session.localSessionId, session.cloudSessionId, "ended");
             ended += 1;
           } catch {

@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
-import { SpikeClient } from "../src/cloud/client.js";
+import { RelayClient } from "../src/cloud/client.js";
 import { syncCloudOnce } from "../src/cloud/sync.js";
 import type { PinboardConfig } from "../src/config/settings.js";
 import { PinboardDatabase } from "../src/storage/database.js";
@@ -11,7 +11,7 @@ import { temporaryPaths } from "./helpers.js";
 const cleanup: string[] = [];
 afterEach(async () => Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true }))));
 
-describe("experimental cloud synchronization", () => {
+describe("cloud synchronization", () => {
   it("pushes presence, replays the durable outbox, pulls inbox once, and flushes receipts", async () => {
     const paths = await temporaryPaths();
     cleanup.push(paths.dataDir);
@@ -38,7 +38,7 @@ describe("experimental cloud synchronization", () => {
     const receiptTypes: string[] = [];
     const seen = { sessions: 0, ended: 0, messages: 0, receipts: 0, inboxFirstPages: 0 };
     const server = createServer((request, response) => {
-      expect(request.headers.authorization).toBe("Bearer design_partner_token_0123456789");
+      expect(request.headers.authorization).toBe("Bearer relay_token_0123456789");
       expect(request.headers["x-pinboard-protocol-version"]).toBe("1");
       const url = new URL(request.url ?? "/", "http://localhost");
       let body = "";
@@ -48,22 +48,22 @@ describe("experimental cloud synchronization", () => {
           response.writeHead(200, { "content-type": "application/json", "x-request-id": "req_test" });
           response.end(JSON.stringify(value));
         };
-        if (url.pathname === "/v1/spike/bootstrap") return send({ data: { organizationId: "org_1", userId: "user_1", deviceId: "device_1", repositoryIds: ["api"], protocolVersion: 1 } });
-        if (url.pathname === "/v1/spike/sessions") {
+        if (url.pathname === "/v1/bootstrap") return send({ data: { organizationId: "org_1", userId: "user_1", deviceId: "device_1", repositoryIds: ["api"], protocolVersion: 1 } });
+        if (url.pathname === "/v1/sessions") {
           expect(request.headers["idempotency-key"]).toBe(local.id);
           expect(JSON.parse(body)).toMatchObject({ repositoryId: "api", repositoryIdentity: repository.identity });
           seen.sessions += 1;
           return send({ data: { session: { id: remoteSessionId } } });
         }
-        if (url.pathname === `/v1/spike/sessions/${remoteSessionId}/presence` && request.method === "PATCH") {
+        if (url.pathname === `/v1/sessions/${remoteSessionId}/presence` && request.method === "PATCH") {
           expect(request.headers["idempotency-key"]).toBeTruthy();
           return send({ data: { session: { id: remoteSessionId } } });
         }
-        if (url.pathname === `/v1/spike/sessions/${remoteSessionId}/end` && request.method === "POST") {
+        if (url.pathname === `/v1/sessions/${remoteSessionId}/end` && request.method === "POST") {
           seen.ended += 1;
           return send({ data: { session: { id: remoteSessionId, state: "ended" } } });
         }
-        if (url.pathname === "/v1/spike/messages" && request.method === "POST") {
+        if (url.pathname === "/v1/messages" && request.method === "POST") {
           const parsed = JSON.parse(body) as Record<string, unknown>;
           expect(parsed).toMatchObject({ senderSessionId: remoteSessionId, recipientUserId: "user_2" });
           expect(parsed).not.toHaveProperty("localThreadId");
@@ -71,14 +71,14 @@ describe("experimental cloud synchronization", () => {
           seen.messages += 1;
           return send({ data: { message: { id: sentMessageIds[seen.messages - 1], threadId: parsed.threadId ?? remoteThreadId } } });
         }
-        if (url.pathname === "/v1/spike/messages/inbox") {
-          expect(url.searchParams.get("session_id")).toBe(remoteSessionId);
+        if (url.pathname === "/v1/messages/inbox") {
+          expect(url.searchParams.get("sessionId")).toBe(remoteSessionId);
           const cursor = url.searchParams.get("cursor");
           if (!cursor) seen.inboxFirstPages += 1;
           const messages = cursor || seen.messages === 0 ? [] : [{ id: receivedMessageId, repositoryId: "api", threadId: remoteThreadId, sender: { userId: "user_2", deviceId: "device_2", sessionId: remoteSenderSessionId, provider: "claude-code", branch: "feature" }, body: "remote reply" }];
           return send({ data: { messages }, meta: { nextCursor: cursor ? null : "cursor_1" } });
         }
-        if (url.pathname === `/v1/spike/messages/${receivedMessageId}/receipts`) {
+        if (url.pathname === `/v1/messages/${receivedMessageId}/receipts`) {
           const parsed = JSON.parse(body) as { sessionId: string; type: string };
           expect(parsed).toMatchObject({ sessionId: remoteSessionId });
           receiptTypes.push(parsed.type);
@@ -98,7 +98,7 @@ describe("experimental cloud synchronization", () => {
       staleMinutes: 30,
       cloud: { enabled: true, apiUrl, organizationId: "org_1", userId: "user_1", deviceId: "device_1", syncPaused: false }, auth: { deviceId: null },
     };
-    const client = new SpikeClient(apiUrl, "design_partner_token_0123456789");
+    const client = new RelayClient(apiUrl, "relay_token_0123456789");
     const first = await syncCloudOnce({ database, config, token: "unused_but_valid_000", client });
     expect(first).toEqual({ sessionsPushed: 1, sessionsEnded: 0, sessionsFailed: 0, messagesSent: 1, messagesFailed: 0, messagesReceived: 0, receiptsSent: 0, receiptsFailed: 0 });
     expect(seen).toMatchObject({ sessions: 1, ended: 0, messages: 1, receipts: 0, inboxFirstPages: 1 });
@@ -147,10 +147,10 @@ describe("experimental cloud synchronization", () => {
         const send = (value: unknown): void => {
           response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(value));
         };
-        if (url.pathname === "/v1/spike/bootstrap") return send({ data: { organizationId: "org_1", userId: "user_1", deviceId: "device_1", repositoryIds: ["web"], protocolVersion: 1 } });
-        if (url.pathname === "/v1/spike/sessions") return send({ data: { session: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" } } });
-        if (url.pathname === "/v1/spike/messages/inbox") return send({ data: { messages: "not-an-array" }, meta: {} });
-        if (url.pathname === "/v1/spike/messages") {
+        if (url.pathname === "/v1/bootstrap") return send({ data: { organizationId: "org_1", userId: "user_1", deviceId: "device_1", repositoryIds: ["web"], protocolVersion: 1 } });
+        if (url.pathname === "/v1/sessions") return send({ data: { session: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" } } });
+        if (url.pathname === "/v1/messages/inbox") return send({ data: { messages: "not-an-array" }, meta: {} });
+        if (url.pathname === "/v1/messages") {
           messages += 1;
           return send({ data: { message: { id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", threadId: "22222222-2222-4222-8222-222222222222" } } });
         }
@@ -163,7 +163,7 @@ describe("experimental cloud synchronization", () => {
     const apiUrl = `http://127.0.0.1:${address.port}`;
     const config: PinboardConfig = { version: 2, idleMinutes: 5, staleMinutes: 30, cloud: { enabled: true, apiUrl, organizationId: "org_1", userId: "user_1", deviceId: "device_1", syncPaused: false }, auth: { deviceId: null } };
     try {
-      const result = await syncCloudOnce({ database, config, token: "design_partner_token_0123456789" });
+      const result = await syncCloudOnce({ database, config, token: "relay_token_0123456789" });
       expect(result).toMatchObject({ sessionsFailed: 1, messagesSent: 1, messagesFailed: 0 });
       expect(messages).toBe(1);
     } finally {
@@ -203,19 +203,19 @@ describe("experimental cloud synchronization", () => {
       const url = new URL(request.url ?? "/", "http://localhost");
       request.resume();
       request.once("end", () => {
-        if (url.pathname === "/v1/spike/bootstrap") {
+        if (url.pathname === "/v1/bootstrap") {
           response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ data: { organizationId: "org_1", userId: "user_1", deviceId: "device_1", repositoryIds: ["errors"], protocolVersion: 1 } }));
           return;
         }
-        if (url.pathname === `/v1/spike/sessions/${remoteSessionId}/presence`) {
+        if (url.pathname === `/v1/sessions/${remoteSessionId}/presence`) {
           response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ data: { session: { id: remoteSessionId } } }));
           return;
         }
-        if (url.pathname === "/v1/spike/messages/inbox") {
+        if (url.pathname === "/v1/messages/inbox") {
           response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ data: { messages: [] }, meta: { nextCursor: null } }));
           return;
         }
-        if (url.pathname === `/v1/spike/messages/${remoteMessageId}/receipts`) {
+        if (url.pathname === `/v1/messages/${remoteMessageId}/receipts`) {
           response.writeHead(409, { "content-type": "application/json" }).end(JSON.stringify({ error: { code: errorCode, message: "receipt rejected" } }));
           return;
         }
@@ -228,7 +228,7 @@ describe("experimental cloud synchronization", () => {
     const apiUrl = `http://127.0.0.1:${address.port}`;
     const config: PinboardConfig = { version: 2, idleMinutes: 5, staleMinutes: 30, cloud: { enabled: true, apiUrl, organizationId: "org_1", userId: "user_1", deviceId: "device_1", syncPaused: false }, auth: { deviceId: null } };
     try {
-      const retry = await syncCloudOnce({ database, config, token: "design_partner_token_0123456789" });
+      const retry = await syncCloudOnce({ database, config, token: "relay_token_0123456789" });
       expect(retry).toMatchObject({ receiptsSent: 0, receiptsFailed: 1 });
       expect(database.database.prepare("SELECT type, status, attempts FROM cloud_receipt_outbox ORDER BY CASE type WHEN 'received' THEN 1 ELSE 2 END").all()).toEqual([
         expect.objectContaining({ type: "received", status: "pending", attempts: 1 }),
@@ -236,7 +236,7 @@ describe("experimental cloud synchronization", () => {
       ]);
       database.database.prepare("UPDATE cloud_receipt_outbox SET available_at = 0 WHERE type = 'received'").run();
       errorCode = "DELIVERY_SUPERSEDED";
-      const superseded = await syncCloudOnce({ database, config, token: "design_partner_token_0123456789" });
+      const superseded = await syncCloudOnce({ database, config, token: "relay_token_0123456789" });
       expect(superseded).toMatchObject({ receiptsSent: 0, receiptsFailed: 1 });
       expect(database.database.prepare("SELECT state FROM cloud_inbox WHERE remote_message_id = ?").get(remoteMessageId)).toMatchObject({ state: "superseded" });
       expect(database.database.prepare("SELECT DISTINCT status FROM cloud_receipt_outbox WHERE remote_message_id = ?").all(remoteMessageId)).toEqual([{ status: "discarded" }]);

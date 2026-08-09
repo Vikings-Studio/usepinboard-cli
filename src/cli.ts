@@ -31,11 +31,14 @@ import { readOrCreateLocalSecret } from "./security/local-auth.js";
 import { formatUntrusted, sanitizeUntrustedText, truncateUtf8 } from "./security/untrusted.js";
 import { heading, line, printJson, success, warning } from "./cli/output.js";
 import { readCloudCredential, removeCloudCredential, validateStaticToken, writeCloudCredential } from "./cloud/credentials.js";
-import { normalizeCloudApiUrl, SpikeClient } from "./cloud/client.js";
+import { normalizeCloudApiUrl, RelayClient } from "./cloud/client.js";
+import { readRelayToken, deleteRelayToken } from "./cloud/token-reader.js";
+import { applyCloudConnection } from "./cloud/activation.js";
+import { deriveRepositoryId, isCloudIdentifier } from "./cloud/identifiers.js";
 import { createCredentialStore } from "./auth/credential-store.js";
 import { openBrowser } from "./auth/browser.js";
 import { DEFAULT_API_URL, DEVICE_AUTH_ACCOUNT, DEVICE_AUTH_SERVICE } from "./constants.js";
-import { currentPlatform, generateDeviceId, normalizeApiUrl, runDeviceLogin } from "./auth/device-auth.js";
+import { currentPlatform, generateDeviceId, normalizeApiUrl, restoreDeviceCredential, runDeviceLogin } from "./auth/device-auth.js";
 
 const require = createRequire(import.meta.url);
 const packageJson = require("../package.json") as { version: string };
@@ -49,7 +52,7 @@ function numeric(value: string): number {
 
 async function readStaticTokenFromStdin(): Promise<string> {
   if (process.stdin.isTTY) {
-    throw new Error("The design-partner token must be supplied on standard input, for example: `security find-generic-password ... -w | pinboard cloud connect --api https://...`");
+    throw new Error("The token must be supplied on standard input, for example: `security find-generic-password ... -w | pinboard cloud connect --api https://...`");
   }
   const chunks: Buffer[] = [];
   let bytes = 0;
@@ -518,19 +521,19 @@ config.command("set").argument("<key>", "idleMinutes or staleMinutes", parseConf
   success(`${key}=${String(next[key])}; restart Pinboard to apply the change`);
 });
 
-const cloud = program.command("cloud").description("EXPERIMENTAL: connect the design-partner Teams relay");
+const cloud = program.command("cloud").description("Connect to the Pinboard Cloud relay (legacy static-token flow)");
 cloud
   .command("connect")
-  .requiredOption("--api <url>", "design-partner relay base URL")
-  .description("EXPERIMENTAL: connect using a static token read only from stdin")
+  .requiredOption("--api <url>", "relay base URL")
+  .description("Connect using a static token read only from stdin (legacy)")
   .action(async (options: { api: string }) => {
-    if (process.platform === "win32") throw new Error("Experimental Teams relay connection is unavailable on Windows until OS credential protection is implemented; Personal remains supported");
+    if (process.platform === "win32") throw new Error("Cloud relay connection is unavailable on Windows until OS credential protection is implemented; Personal remains supported");
     const paths = getPaths();
     const token = await readStaticTokenFromStdin();
     const apiUrl = normalizeCloudApiUrl(options.api);
     const current = await readConfig(paths);
     const previousToken = current.cloud.enabled ? await readCloudCredential(paths).catch(() => null) : null;
-    const relay = new SpikeClient(apiUrl, token);
+    const relay = new RelayClient(apiUrl, token);
     const bootstrap = await relay.bootstrap();
     const nextCloud = {
       enabled: true,
@@ -544,17 +547,19 @@ cloud
     const client = await ensureStarted();
     try {
       await writeCloudCredential(paths, token);
-      await setCloudConfig(paths, nextCloud);
-      await client.post("/v1/cloud/connection", { ...nextCloud });
+      await applyCloudConnection({
+        paths,
+        nextCloud,
+        previousCloud: current.cloud,
+        notify: async (cloud) => { await client.post("/v1/cloud/connection", { ...cloud }); },
+      });
     } catch (error) {
-      await setCloudConfig(paths, current.cloud).catch(() => undefined);
       if (previousToken) await writeCloudCredential(paths, previousToken).catch(() => undefined);
       else await removeCloudCredential(paths).catch(() => undefined);
       throw error;
     }
-    warning("Experimental Teams relay connected with a design-partner token.");
     success(`Organization ${bootstrap.organizationId}; ${bootstrap.repositoryIds.length} allowed repositories`);
-    line("Link a repository with `pinboard repo link --repository-id <id>` and run `pinboard sync now`.");
+    line("Link a repository with `pinboard repo link` and run `pinboard sync now`.");
   });
 cloud.command("status").option("--json").action(async (options: { json?: boolean }) => {
   const client = await ensureStarted();
@@ -563,7 +568,7 @@ cloud.command("status").option("--json").action(async (options: { json?: boolean
   else {
     const config = status.config as Record<string, unknown> | undefined;
     const queue = status.queue as Record<string, unknown> | undefined;
-    heading("Pinboard Teams relay (experimental)");
+    heading("Pinboard Cloud relay");
     line(config?.enabled ? `Connected to ${String(config.apiUrl)} as organization ${String(config.organizationId)}` : "Not connected");
     if (queue) {
       const outboxDead = typeof queue.outboxDead === "number" ? queue.outboxDead : 0;
@@ -587,8 +592,8 @@ cloud
     await client.delete(`/v1/cloud/connection?discardPending=${String(options.discardPending === true)}`);
     const current = await readConfig(paths);
     await setCloudConfig(paths, { ...current.cloud, enabled: false, syncPaused: false });
-    await removeCloudCredential(paths);
-    success("Disconnected the experimental Teams relay. Personal data and local messaging were preserved.");
+    await deleteRelayToken(paths);
+    success("Disconnected the Cloud relay. Personal data and local messaging were preserved.");
   });
 
 const auth = program.command("auth").description("Authenticate this device with Pinboard Cloud using the device authorization flow");
@@ -604,6 +609,10 @@ auth
     const config = await readConfig(paths);
     const deviceId = config.auth.deviceId ?? generateDeviceId();
     const credentialStore = createCredentialStore();
+    // Preserve any previously stored OS token before the device
+    // authorization flow overwrites it; a failed local cloud activation
+    // must restore the prior token instead of stranding the old session.
+    const previousToken = await credentialStore.read(DEVICE_AUTH_SERVICE, DEVICE_AUTH_ACCOUNT).catch(() => null);
     const result = await runDeviceLogin({
       apiUrl,
       deviceId,
@@ -623,13 +632,34 @@ auth
       },
     });
     await ensureDirectories(paths);
-    // Persist the server-returned device id so the stored config matches
-    // the device grant the token is bound to, rather than the value we
-    // happened to send (which may have been a freshly generated one).
-    await setAuthConfig(paths, { deviceId: result.deviceId });
+    const previousCloud = config.cloud;
+    const previousAuth = config.auth;
+    const nextCloud = {
+      enabled: true,
+      apiUrl,
+      organizationId: result.organizationId,
+      userId: result.userId,
+      deviceId: result.deviceId,
+      syncPaused: false,
+    };
+    try {
+      await setAuthConfig(paths, { deviceId: result.deviceId });
+      await applyCloudConnection({
+        paths,
+        nextCloud,
+        previousCloud,
+        notify: async (cloud) => {
+          const client = await ensureStarted();
+          await client.post("/v1/cloud/connection", { ...cloud });
+        },
+      });
+    } catch (error) {
+      await setAuthConfig(paths, previousAuth).catch(() => undefined);
+      await restoreDeviceCredential(credentialStore, previousToken).catch(() => undefined);
+      throw error;
+    }
     success(`Authenticated as organization ${result.organizationId}, user ${result.userId}`);
-    line(`Device ${result.deviceId} is authorized for scope: ${result.scope}`);
-    line("The access token is stored in your OS credential store and is never printed.");
+    line(`Device ${result.deviceId} is authorized`);
   });
 auth
   .command("status")
@@ -657,14 +687,22 @@ auth
   });
 auth
   .command("logout")
-  .description("Remove the stored access token from the OS credential store")
+  .description("Disconnect Cloud relay and remove the stored access token")
   .action(async () => {
-    const credentialStore = createCredentialStore();
-    await credentialStore.delete(DEVICE_AUTH_SERVICE, DEVICE_AUTH_ACCOUNT);
-    success("Removed the stored access token. Server-side revocation is not performed by this command.");
+    const paths = getPaths();
+    const client = await ensureStarted().catch(() => null);
+    if (client) {
+      try { await client.delete("/v1/cloud/connection?discardPending=true"); } catch { /* best-effort */ }
+    }
+    const current = await readConfig(paths);
+    if (current.cloud.enabled) {
+      await setCloudConfig(paths, { ...current.cloud, enabled: false, syncPaused: false });
+    }
+    await deleteRelayToken(paths);
+    success("Disconnected Cloud relay and removed the stored access token. Server-side revocation is not performed by this command.");
   });
 
-const sync = program.command("sync").description("EXPERIMENTAL: synchronize the Teams relay once or control synchronization");
+const sync = program.command("sync").description("Synchronize the Cloud relay once or control synchronization");
 sync.command("now").option("--json").action(async (options: { json?: boolean }) => {
   const client = await ensureStarted();
   const result = await client.post<Record<string, unknown>>("/v1/cloud/sync");
@@ -690,32 +728,39 @@ for (const paused of [true, false]) {
   });
 }
 
-const repo = program.command("repo").description("EXPERIMENTAL: manage explicit Teams repository links");
+const repo = program.command("repo").description("Manage Cloud repository links");
 repo
   .command("link")
   .argument("[path]", "repository path", process.cwd())
-  .requiredOption("--repository-id <id>", "allowed relay repository ID")
-  .action(async (path: string, options: { repositoryId: string }) => {
+  .option("--repository-id <id>", "override the derived repository ID")
+  .action(async (path: string, options: { repositoryId?: string }) => {
     const paths = getPaths();
     const config = await readConfig(paths);
     if (!config.cloud.enabled || !config.cloud.organizationId || !config.cloud.apiUrl) throw new Error("Pinboard Cloud is not connected");
     const repository = detectRepository(path);
-    if (repository.identity.startsWith("local:")) throw new Error("A repository with a normalized Git remote is required for Teams");
-    const bootstrap = await new SpikeClient(config.cloud.apiUrl, await readCloudCredential(paths)).bootstrap();
-    if (!bootstrap.repositoryIds.includes(options.repositoryId)) throw new Error("The repository ID is not allowed by this design-partner token");
+    if (repository.identity.startsWith("local:")) throw new Error("A repository with a normalized Git remote is required for Cloud relay");
+    let repositoryId: string;
+    if (options.repositoryId) {
+      if (!isCloudIdentifier(options.repositoryId)) throw new Error("--repository-id must be a stable 1-128 character identifier");
+      repositoryId = options.repositoryId;
+    } else {
+      repositoryId = deriveRepositoryId(repository.identity);
+    }
+    const relay = new RelayClient(config.cloud.apiUrl, await readRelayToken(paths));
+    await relay.linkRepository(repositoryId, repository.identity, repository.name);
     const client = await ensureStarted();
     await client.post("/v1/cloud/repositories", {
       organizationId: config.cloud.organizationId,
-      repositoryId: options.repositoryId,
+      repositoryId,
       repositoryIdentity: repository.identity,
       repositoryName: repository.name,
     });
-    success(`Linked ${repository.identity} to ${options.repositoryId}`);
+    success(`Linked ${repository.identity} to ${repositoryId}`);
   });
 repo.command("list").option("--json").action(async (options: { json?: boolean }) => {
   const links = await (await ensureStarted()).get<Array<Record<string, unknown>>>("/v1/cloud/repositories");
   if (options.json) printJson(links);
-  else if (links.length === 0) line("No Teams repositories linked.");
+  else if (links.length === 0) line("No Cloud repositories linked.");
   else for (const link of links) line(`${String(link.repositoryId)}  ${String(link.repositoryIdentity)}`);
 });
 repo.command("status").argument("[path]", "repository path", process.cwd()).option("--json").action(async (path: string, options: { json?: boolean }) => {
@@ -723,7 +768,7 @@ repo.command("status").argument("[path]", "repository path", process.cwd()).opti
   const links = await (await ensureStarted()).get<Array<Record<string, unknown>>>("/v1/cloud/repositories");
   const link = links.find((item) => item.repositoryIdentity === repository.identity) ?? null;
   if (options.json) printJson({ repository, link });
-  else line(link ? `Linked to ${String(link.repositoryId)}` : "This repository is not linked to Teams.");
+  else line(link ? `Linked to ${String(link.repositoryId)}` : "This repository is not linked to Cloud.");
 });
 repo.command("unlink").argument("<id-or-identity>").action(async (selector: string) => {
   await (await ensureStarted()).delete(`/v1/cloud/repositories/${encodeURIComponent(selector)}`);

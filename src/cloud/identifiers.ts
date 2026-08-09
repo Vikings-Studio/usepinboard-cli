@@ -1,8 +1,14 @@
+import { createHash } from "node:crypto";
+
 export const CLOUD_IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 export const CLOUD_RESOURCE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
 export function isCloudIdentifier(value: unknown): value is string {
   return typeof value === "string" && CLOUD_IDENTIFIER_PATTERN.test(value);
+}
+
+export function deriveRepositoryId(repositoryIdentity: string): string {
+  return `repo-${createHash("sha256").update(repositoryIdentity).digest("hex").slice(0, 32)}`;
 }
 
 export function requireCloudIdentifier(value: unknown, label: string): string {

@@ -215,6 +215,48 @@ describe("daemon IPC", () => {
     if (process.platform !== "win32") expect(await exists(paths.socket)).toBe(false);
   });
 
+  it("activates a cloud connection only when the daemon matches the active config", async () => {
+    const paths = await temporaryPaths();
+    cleanup.push(paths.dataDir);
+    const daemon = await startDaemon({ version: "test", paths });
+    try {
+      const client = new DaemonClient(paths);
+      const cloud = {
+        enabled: true,
+        apiUrl: "https://relay.example.test",
+        organizationId: "org_activation",
+        userId: "user_1",
+        deviceId: "device_1",
+        syncPaused: false,
+      };
+      await expect(client.post("/v1/cloud/connection", {
+        organizationId: cloud.organizationId,
+        apiUrl: cloud.apiUrl,
+        userId: cloud.userId,
+        deviceId: cloud.deviceId,
+      })).rejects.toMatchObject({ status: 400 });
+
+      await setCloudConfig(paths, cloud);
+      const activated = await client.post<{ organizationId: string }>("/v1/cloud/connection", {
+        organizationId: cloud.organizationId,
+        apiUrl: cloud.apiUrl,
+        userId: cloud.userId,
+        deviceId: cloud.deviceId,
+      });
+      expect(activated.organizationId).toBe("org_activation");
+
+      const status = await client.get<{ config: { enabled: boolean }; connection: { organizationId: string } | null }>("/v1/cloud/status");
+      expect(status.config.enabled).toBe(true);
+      expect(status.connection?.organizationId).toBe("org_activation");
+
+      await client.delete("/v1/cloud/connection");
+      const cleared = await client.get<{ connection: unknown }>("/v1/cloud/status");
+      expect(cleared.connection).toBeNull();
+    } finally {
+      await daemon.close();
+    }
+  });
+
   it("fails closed without deleting daemon state when lifecycle authentication fails", async () => {
     const paths = await temporaryPaths();
     cleanup.push(paths.dataDir);
