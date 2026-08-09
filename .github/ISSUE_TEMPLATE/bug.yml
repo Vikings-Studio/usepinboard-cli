@@ -1,0 +1,39 @@
+name: Bug report
+description: Report reproducible incorrect behavior without including secrets or private data.
+title: "[Bug]: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: Security vulnerabilities must use private vulnerability reporting, not this form.
+  - type: input
+    id: version
+    attributes:
+      label: Pinboard version or commit
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: OS, Node version, and provider version
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Remove repository names, paths, prompts, messages, tokens, and personal data.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true

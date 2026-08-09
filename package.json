@@ -1,0 +1,66 @@
+{
+  "name": "@usepinboard/cli",
+  "version": "0.0.0-development",
+  "description": "Local-first presence, discovery, messaging, and advisory leases for coding agents.",
+  "type": "module",
+  "bin": {
+    "pinboard": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md"
+  ],
+  "scripts": {
+    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "clean": "node scripts/clean.mjs",
+    "dev": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "npm run typecheck && npm run lint && npm test && npm run build",
+    "pack:check": "npm pack --dry-run"
+  },
+  "engines": {
+    "node": ">=24.15.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Vikings-Studio/usepinboard-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Vikings-Studio/usepinboard-cli/issues"
+  },
+  "homepage": "https://usepinboard.com",
+  "keywords": [
+    "agents",
+    "claude-code",
+    "codex",
+    "mcp",
+    "developer-tools",
+    "local-first"
+  ],
+  "author": "Vikings Studio",
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "commander": "14.0.3",
+    "picocolors": "1.1.1",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.1",
+    "@types/node": "24.10.1",
+    "eslint": "9.39.1",
+    "tsx": "4.20.6",
+    "typescript": "~5.9.3",
+    "typescript-eslint": "8.46.4",
+    "vitest": "3.2.7"
+  }
+}
