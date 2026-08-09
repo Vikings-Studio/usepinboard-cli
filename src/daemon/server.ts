@@ -187,6 +187,7 @@ export async function startDaemon(options: {
             body: input.body,
             ...(input.senderSessionId === undefined ? {} : { senderSessionId: input.senderSessionId }),
             ...(input.threadId === undefined ? {} : { threadId: input.threadId }),
+            ...(input.idempotencyKey === undefined ? {} : { idempotencyKey: input.idempotencyKey }),
           }),
         );
         return;

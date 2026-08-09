@@ -27,6 +27,7 @@ export const sendMessageSchema = z.object({
   to: z.string().min(1).max(1024),
   body: z.string().min(1).max(32 * 1024),
   threadId: z.uuid().optional(),
+  idempotencyKey: z.uuid().optional(),
 });
 
 export const leaseSchema = z.object({

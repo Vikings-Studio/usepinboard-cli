@@ -91,15 +91,17 @@ export async function runMcpServer(options: {
         to: z.string().min(1),
         message: z.string().min(1).max(32 * 1024),
         thread_id: z.uuid().optional(),
+        idempotency_key: z.uuid().optional(),
       },
     },
-    async ({ to, message, thread_id }) =>
+    async ({ to, message, thread_id, idempotency_key }) =>
       result(
         await client.post("/v1/messages", {
           senderSessionId: sessionId,
           to,
           body: message,
           ...(thread_id ? { threadId: thread_id } : {}),
+          ...(idempotency_key ? { idempotencyKey: idempotency_key } : {}),
         }),
       ),
   );
@@ -117,9 +119,6 @@ export async function runMcpServer(options: {
       const messages = await client.get<MessageRecord[]>(
         `/v1/inbox?sessionId=${encodeURIComponent(sessionId)}&unreadOnly=${String(unread_only)}&limit=${String(limit)}`,
       );
-      for (const message of messages) {
-        await client.post(`/v1/messages/${message.id}/read`, { sessionId });
-      }
       return result({
         messages: messages.map((message) => ({
           id: message.id,
@@ -129,6 +128,18 @@ export async function runMcpServer(options: {
           body: formatUntrusted({ kind: "message", sender: message.senderAddress, body: message.body }),
         })),
       });
+    },
+  );
+
+  server.registerTool(
+    "mark_read",
+    {
+      description: "Acknowledge that this session has consumed a surfaced message.",
+      inputSchema: { message_id: z.uuid() },
+    },
+    async ({ message_id }) => {
+      await client.post(`/v1/messages/${message_id}/read`, { sessionId });
+      return result({ ok: true, messageId: message_id });
     },
   );
 

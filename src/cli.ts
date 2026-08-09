@@ -188,14 +188,16 @@ program
   .argument("<message>", "message body")
   .option("--from-session <id>")
   .option("--thread <id>")
+  .option("--idempotency-key <uuid>", "reuse a stable key when retrying a send")
   .option("--json")
-  .action(async (to: string, message: string, options: { fromSession?: string; thread?: string; json?: boolean }) => {
+  .action(async (to: string, message: string, options: { fromSession?: string; thread?: string; idempotencyKey?: string; json?: boolean }) => {
     const client = await ensureStarted();
     const sent = await client.post("/v1/messages", {
       to,
       body: message,
       ...(options.fromSession ? { senderSessionId: options.fromSession } : {}),
       ...(options.thread ? { threadId: options.thread } : {}),
+      ...(options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {}),
     });
     if (options.json) printJson(sent);
     else success(`Message queued for ${to}`);

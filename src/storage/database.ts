@@ -17,7 +17,7 @@ import type {
 } from "../domain/types.js";
 import { ensureDirectories, getPaths, type PinboardPaths } from "../platform/paths.js";
 import { normalizeLeasePaths } from "../security/lease-path.js";
-import { sanitizeUntrustedText } from "../security/untrusted.js";
+import { sanitizeUntrustedText, truncateUtf8 } from "../security/untrusted.js";
 import { SCHEMA_MIGRATIONS, SCHEMA_VERSION } from "./schema.js";
 
 type SqlRow = Record<string, unknown>;
@@ -110,7 +110,7 @@ export class PinboardDatabase {
 
   registerSession(input: SessionInput): SessionRecord {
     const now = Date.now();
-    const taskLabel = input.taskLabel ? sanitizeUntrustedText(input.taskLabel).slice(0, MAX_TASK_LABEL_BYTES) : null;
+    const taskLabel = input.taskLabel ? truncateUtf8(sanitizeUntrustedText(input.taskLabel), MAX_TASK_LABEL_BYTES) : null;
     const address = makeAddress(
       input.provider,
       input.repository.name,
@@ -165,7 +165,7 @@ export class PinboardDatabase {
   }
 
   heartbeat(sessionId: string, taskLabel?: string): SessionRecord {
-    const cleaned = taskLabel ? sanitizeUntrustedText(taskLabel).slice(0, MAX_TASK_LABEL_BYTES) : null;
+    const cleaned = taskLabel ? truncateUtf8(sanitizeUntrustedText(taskLabel), MAX_TASK_LABEL_BYTES) : null;
     const result = this.database
       .prepare(
         `UPDATE sessions
@@ -240,9 +240,14 @@ export class PinboardDatabase {
     to: string;
     body: string;
     threadId?: string;
+    idempotencyKey?: string;
   }): { message: MessageRecord; alternatives: SessionRecord[] } {
     if (!input.body.trim()) throw new Error("Message cannot be empty");
     if (byteLength(input.body) > MAX_MESSAGE_BYTES) throw new Error("Message exceeds 32 KiB");
+    if (input.idempotencyKey) {
+      const existing = this.database.prepare("SELECT id FROM messages WHERE idempotency_key = ?").get(input.idempotencyKey);
+      if (existing) return { message: this.getMessage(text(asRow(existing).id)), alternatives: [] };
+    }
     this.refreshPresenceStates();
     const matches = this.all(
       this.database.prepare(
@@ -278,8 +283,8 @@ export class PinboardDatabase {
         .prepare(
           `INSERT INTO messages(
              id, thread_id, sender_session_id, sender_address, recipient_session_id,
-             recipient_address, body, status, created_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?)`,
+             recipient_address, body, status, created_at, idempotency_key
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
         )
         .run(
           id,
@@ -290,6 +295,7 @@ export class PinboardDatabase {
           recipient.address,
           body,
           now,
+          input.idempotencyKey ?? null,
         );
       this.database.exec("COMMIT");
     } catch (error) {

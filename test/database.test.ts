@@ -157,4 +157,20 @@ describe("local database", () => {
     expect(database.listLeases(repository.identity)).toHaveLength(0);
     database.close();
   });
+
+  it("returns the original message when a send is retried with the same idempotency key", async () => {
+    const paths = await temporaryPaths();
+    cleanup.push(paths.dataDir);
+    const database = await PinboardDatabase.open(paths);
+    const repository = { identity: "local:idempotency", name: "idempotency", root: "/tmp/idempotency", branch: "main" };
+    const recipient = database.registerSession({ id: randomUUID(), provider: "claude-code", repository });
+    const key = randomUUID();
+    const first = database.sendMessage({ to: recipient.id, body: "deliver once", idempotencyKey: key });
+    const retry = database.sendMessage({ to: recipient.id, body: "changed retry body", idempotencyKey: key });
+
+    expect(retry.message.id).toBe(first.message.id);
+    expect(retry.message.body).toBe("deliver once");
+    expect(database.inbox({ sessionId: recipient.id })).toHaveLength(1);
+    database.close();
+  });
 });

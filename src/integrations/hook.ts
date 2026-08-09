@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { MAX_REQUEST_BYTES } from "../constants.js";
 import type { Provider } from "../domain/types.js";
 import { detectRepository } from "../domain/repository.js";
 import { DaemonClient } from "../daemon/client.js";
@@ -11,12 +12,26 @@ function stableUuid(value: string): string {
   return `${joined.slice(0, 8)}-${joined.slice(8, 12)}-${joined.slice(12, 16)}-${joined.slice(16, 20)}-${joined.slice(20)}`;
 }
 
+export function parseHookPayload(raw: Buffer): Record<string, unknown> {
+  if (raw.length > MAX_REQUEST_BYTES) throw new Error("Provider hook input exceeds 64 KiB");
+  if (raw.length === 0) return {};
+  const value = JSON.parse(raw.toString("utf8")) as unknown;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Provider hook input must be a JSON object");
+  }
+  return value as Record<string, unknown>;
+}
+
 async function readStdin(): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
-  for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk as Uint8Array));
-  if (chunks.length === 0) return {};
-  const value = JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
-  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  let bytes = 0;
+  for await (const chunk of process.stdin) {
+    const buffer = Buffer.from(chunk as Uint8Array);
+    bytes += buffer.length;
+    if (bytes > MAX_REQUEST_BYTES) throw new Error("Provider hook input exceeds 64 KiB");
+    chunks.push(buffer);
+  }
+  return parseHookPayload(Buffer.concat(chunks));
 }
 
 function stringField(input: Record<string, unknown>, ...names: string[]): string | undefined {
