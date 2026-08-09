@@ -6,11 +6,36 @@ import { DaemonClient } from "../daemon/client.js";
 import { detectRepository } from "../domain/repository.js";
 import type { LeaseRecord, MessageRecord, Provider, SessionRecord, SessionRegistration, ThreadRecord } from "../domain/types.js";
 import { formatUntrusted } from "../security/untrusted.js";
+import { getPaths } from "../platform/paths.js";
+import { readConfig } from "../config/settings.js";
+import { readRelayToken } from "../cloud/token-reader.js";
+import { cloudAwareWho, type DiscoveryEntry } from "../cloud/discovery.js";
 
 function result(value: unknown) {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }],
     structuredContent: value as Record<string, unknown>,
+  };
+}
+
+function discoverySessionView(entry: DiscoveryEntry) {
+  return {
+    id: entry.id,
+    address: entry.address,
+    origin: entry.origin,
+    provider: entry.provider,
+    repository: entry.repositoryName,
+    repositoryName: entry.repositoryName,
+    repositoryIdentity: entry.repositoryIdentity,
+    branch: entry.branch,
+    state: entry.state,
+    lastActiveAt: entry.lastActiveAt,
+    task: entry.taskLabel
+      ? formatUntrusted({ kind: "task", sender: entry.address, body: entry.taskLabel })
+      : null,
+    taskLabel: entry.taskLabel,
+    ...(entry.userId ? { userId: entry.userId } : {}),
+    ...(entry.deviceId ? { deviceId: entry.deviceId } : {}),
   };
 }
 
@@ -66,20 +91,47 @@ export async function runMcpServer(options: {
     },
     async ({ repo, branch, include_idle }) => {
       const repositoryIdentity = resolveDiscoveryRepository(repo, repository.identity);
-      const query = new URLSearchParams();
-      query.set("repo", repositoryIdentity);
-      if (branch) query.set("branch", branch);
-      query.set("includeIdle", String(include_idle));
-      const sessions = await client.get<SessionRecord[]>(`/v1/presence?${query.toString()}`);
+      const paths = getPaths();
+      const config = await readConfig(paths);
+      const linked = config.cloud.enabled && config.cloud.organizationId
+        ? await client.get<Array<Record<string, unknown>>>("/v1/cloud/repositories")
+        : [];
+      const match = linked.find((item) => item.repositoryIdentity === repositoryIdentity);
+      const repositoryId = typeof match?.repositoryId === "string" ? match.repositoryId : null;
+      let token: string | null = null;
+      if (config.cloud.enabled && config.cloud.apiUrl && config.cloud.organizationId) {
+        try {
+          token = await readRelayToken(paths);
+        } catch {
+          token = null;
+        }
+      }
+      const discovery = await cloudAwareWho({
+        config,
+        repositoryIdentity,
+        ...(branch ? { branch } : {}),
+        includeIdle: include_idle,
+        repositoryId,
+        token,
+        listLocal: async () => {
+          const query = new URLSearchParams();
+          query.set("repo", repositoryIdentity);
+          if (branch) query.set("branch", branch);
+          query.set("includeIdle", String(include_idle));
+          return client.get<SessionRecord[]>(`/v1/presence?${query.toString()}`);
+        },
+        excludeSessionId: sessionId,
+      });
       const leases = await client.get<LeaseRecord[]>(`/v1/leases?repo=${encodeURIComponent(repositoryIdentity)}`);
       return result({
-        sessions: sessions.filter((item) => item.id !== sessionId).map(safeSession),
+        sessions: discovery.sessions.map(discoverySessionView),
         leases: leases.map((lease) => ({
           ...lease,
           note: lease.note
             ? formatUntrusted({ kind: "lease", sender: lease.ownerAddress, body: lease.note })
             : null,
         })),
+        cloud: discovery.cloud,
       });
     },
   );

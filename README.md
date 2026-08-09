@@ -25,6 +25,7 @@ Pinboard is a local-first communication layer for coding agents. It gives Claude
 - Deterministic repository and branch detection through Git.
 - Device authentication against a WorkOS-backed organization, with the scoped access token stored in the OS credential store and a local Cloud connection activated on success.
 - An opt-in Cloud relay client with repository linking and durable one-shot synchronization, offline outbox/inbox state, and deduplicated inbox delivery.
+- Cloud-aware discovery: `pinboard who` and the MCP `who` tool merge local presence with Cloud sessions when Cloud is connected and the current repository is linked, labeling each session's origin.
 
 ## Requirements
 
@@ -94,7 +95,7 @@ pinboard cloud connect --api <https-url> (legacy static-token)|status|disconnect
 pinboard sync now|status|pause|resume
 pinboard repo link [--repository-id <id>]|status|list|unlink
 pinboard session end --id <session-id>
-pinboard who [--repo <identity>] [--branch <branch>]
+pinboard who [--repo <identity>] [--branch <branch>]  # merges Cloud discovery when linked
 pinboard send <address> <message>
 pinboard inbox --session <id> [--unread-only] [--limit <n>]
 pinboard threads [--session <id>] [--limit <n>]
@@ -151,6 +152,18 @@ pinboard sync now
 ```
 
 Only HTTPS relay URLs are accepted, except loopback HTTP used by tests. The static-token `cloud connect` flow uses the same repository link and synchronization machinery described above.
+
+## Teams: cloud-aware discovery
+
+`pinboard who` and the MCP `who` tool merge local presence with Cloud discovery when the device is authenticated, Cloud is connected, and the current repository has a Cloud link. The repository id is resolved only from the existing local Cloud repository mapping for the detected or `--repo`-requested repository; `who` never links or mutates a repository.
+
+Discovery is local-first:
+
+- When Cloud is disabled, unauthenticated, or the repository is not linked, `who` returns local results and reports an honest status (`disabled` or `unlinked`) without making any network request.
+- When connected, local and Cloud sessions are merged, deduplicated deterministically, and labeled with an `origin` of `local` or `cloud`. The caller's own device is excluded server-side.
+- When Cloud is reachable but the fetch fails, `who` still returns local results with a concise degraded warning rather than failing; it never claims Cloud completeness.
+
+`who --json` preserves its existing array envelope; each session carries an `origin` field plus the usual local fields. The MCP `who` envelope keeps `sessions` and `leases` and adds a `cloud` object with `status` (`disabled`, `unlinked`, `connected`, or `degraded`), `reasonCode`, `matched`, and a sanitized `warning`. Discovery queries are bounded to 20 pages of 100 sessions with repeated-cursor detection, and the request body carries only the discovery contract fields—never `organizationId`, `userId`, or `deviceId`, which come exclusively from the device token.
 
 ## Privacy and security
 

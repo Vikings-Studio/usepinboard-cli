@@ -1,7 +1,7 @@
-import { PROTOCOL_VERSION } from "../constants.js";
+import { MAX_TASK_LABEL_BYTES, PROTOCOL_VERSION } from "../constants.js";
 import { PROTOCOL_VERSION_HEADER } from "../protocol/version.js";
 import { sanitizeUntrustedText, truncateUtf8 } from "../security/untrusted.js";
-import { isCloudIdentifier, requireCloudIdentifier } from "./identifiers.js";
+import { CLOUD_IDENTIFIER_PATTERN, isCloudIdentifier, isCloudResourceId, requireCloudIdentifier } from "./identifiers.js";
 
 export interface RelayBootstrap {
   organizationId: string;
@@ -13,6 +13,110 @@ export interface RelayBootstrap {
 
 /** @deprecated Use RelayBootstrap instead */
 export type SpikeBootstrap = RelayBootstrap;
+
+export const DISCOVERY_MAX_PAGES = 20;
+export const DISCOVERY_PAGE_SIZE = 100;
+
+export interface RelayDiscoveryQuery {
+  repositoryId: string;
+  includeIdle: boolean;
+  branch?: string;
+  provider?: string;
+  userFilterId?: string;
+  taskLabel?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface RelayDiscoverySession {
+  id: string;
+  repositoryId: string;
+  provider: string;
+  providerSessionId: string | null;
+  branch: string;
+  taskLabel: string | null;
+  state: "active" | "idle" | "ended" | "stale";
+  lastActiveAt: string;
+  userId: string;
+  deviceId: string;
+}
+
+export interface RelayDiscoveryMeta {
+  reasonCode: string | null;
+  matched: number | null;
+  nextCursor: string | null;
+}
+
+export interface RelayDiscoveryResult {
+  sessions: RelayDiscoverySession[];
+  meta: RelayDiscoveryMeta;
+}
+
+function parseDiscoverySession(value: unknown): RelayDiscoverySession {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Relay discovery response is incompatible with this CLI");
+  const record = value as Record<string, unknown>;
+  if (!isCloudResourceId(record.id) || !isCloudIdentifier(record.repositoryId) || !isCloudIdentifier(record.userId)
+    || !isCloudIdentifier(record.deviceId) || typeof record.provider !== "string" || !CLOUD_IDENTIFIER_PATTERN.test(record.provider)
+    || (record.providerSessionId !== null && typeof record.providerSessionId !== "string")
+    || typeof record.branch !== "string" || record.branch.length < 1 || record.branch.length > 512
+    || !["active", "idle", "ended", "stale"].includes(String(record.state))
+    || (record.taskLabel !== null && (typeof record.taskLabel !== "string" || record.taskLabel.length > MAX_TASK_LABEL_BYTES * 4))) {
+    throw new Error("Relay discovery response is incompatible with this CLI");
+  }
+  let lastActiveAt: string;
+  if (typeof record.lastActiveAt === "string") {
+    const parsed = new Date(record.lastActiveAt);
+    if (Number.isNaN(parsed.getTime())) throw new Error("Relay discovery response is incompatible with this CLI");
+    lastActiveAt = parsed.toISOString();
+  } else if (typeof record.lastActiveAt === "number" && Number.isFinite(record.lastActiveAt)) {
+    lastActiveAt = new Date(record.lastActiveAt).toISOString();
+  } else {
+    throw new Error("Relay discovery response is incompatible with this CLI");
+  }
+  return {
+    id: record.id,
+    repositoryId: record.repositoryId,
+    provider: record.provider,
+    providerSessionId: record.providerSessionId,
+    branch: record.branch,
+    taskLabel: typeof record.taskLabel === "string" ? truncateUtf8(sanitizeUntrustedText(record.taskLabel), MAX_TASK_LABEL_BYTES) : null,
+    state: record.state as RelayDiscoverySession["state"],
+    lastActiveAt,
+    userId: record.userId,
+    deviceId: record.deviceId,
+  };
+}
+
+export function parseDiscoveryResponse(value: unknown): RelayDiscoveryResult {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Relay discovery response is incompatible with this CLI");
+  const envelope = value as { data?: unknown; meta?: unknown };
+  if (!envelope.data || typeof envelope.data !== "object" || Array.isArray(envelope.data)
+    || !envelope.meta || typeof envelope.meta !== "object" || Array.isArray(envelope.meta)) {
+    throw new Error("Relay discovery response is incompatible with this CLI");
+  }
+  const sessions = (envelope.data as { sessions?: unknown }).sessions;
+  if (!Array.isArray(sessions)) throw new Error("Relay discovery response is incompatible with this CLI");
+  const meta = envelope.meta as { reasonCode?: unknown; matched?: unknown; nextCursor?: unknown };
+  const reasonCode = meta.reasonCode === null || meta.reasonCode === undefined
+    ? null
+    : typeof meta.reasonCode === "string"
+      ? truncateUtf8(sanitizeUntrustedText(meta.reasonCode).replace(/\s+/gu, " ").trim(), 256)
+      : (() => { throw new Error("Relay discovery response is incompatible with this CLI"); })();
+  const matched = meta.matched === null || meta.matched === undefined
+    ? null
+    : typeof meta.matched === "number" && Number.isSafeInteger(meta.matched) && meta.matched >= 0
+      ? meta.matched
+      : (() => { throw new Error("Relay discovery response is incompatible with this CLI"); })();
+  const nextCursor = meta.nextCursor === null || meta.nextCursor === undefined
+    ? null
+    : typeof meta.nextCursor === "string" && meta.nextCursor.length > 0 && meta.nextCursor.length <= 4096
+      ? meta.nextCursor
+      : (() => { throw new Error("Relay discovery response is incompatible with this CLI"); })();
+  return {
+    sessions: sessions.map(parseDiscoverySession),
+    meta: { reasonCode, matched, nextCursor },
+  };
+}
 
 export class CloudClientError extends Error {
   readonly code: string;
@@ -93,9 +197,45 @@ export class RelayClient {
     return this.call<T>("PATCH", path, body, idempotencyKey);
   }
 
-  private async call<T>(method: string, path: string, body?: unknown, idempotencyKey?: string): Promise<T> {
+  async discovery(input: RelayDiscoveryQuery): Promise<RelayDiscoveryResult> {
+    requireCloudIdentifier(input.repositoryId, "repositoryId");
+    if (typeof input.includeIdle !== "boolean") throw new Error("Discovery includeIdle must be a boolean");
+    if (input.limit !== undefined && (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > DISCOVERY_PAGE_SIZE)) {
+      throw new Error(`Discovery limit must be an integer from 1 to ${DISCOVERY_PAGE_SIZE}`);
+    }
+    const visited = new Set<string>();
+    let cursor: string | null = null;
+    let sessions: RelayDiscoverySession[] = [];
+    let meta: RelayDiscoveryMeta = { reasonCode: null, matched: null, nextCursor: null };
+    for (let page = 0; page < DISCOVERY_MAX_PAGES; page += 1) {
+      const body: Record<string, unknown> = {
+        repositoryId: input.repositoryId,
+        includeIdle: input.includeIdle,
+        limit: input.limit ?? DISCOVERY_PAGE_SIZE,
+      };
+      if (input.branch) body.branch = input.branch;
+      if (input.provider) body.provider = input.provider;
+      if (input.userFilterId) body.userFilterId = input.userFilterId;
+      if (input.taskLabel) body.taskLabel = input.taskLabel;
+      if (cursor !== null) body.cursor = cursor;
+      const pageResult = parseDiscoveryResponse(await this.call<unknown>("POST", "/v1/discovery/query", body, undefined, true));
+      sessions = sessions.concat(pageResult.sessions);
+      meta = {
+        ...pageResult.meta,
+        matched: meta.matched ?? pageResult.meta.matched,
+      };
+      if (meta.nextCursor === null) break;
+      if (visited.has(meta.nextCursor)) throw new Error("Relay returned a repeated discovery cursor");
+      visited.add(meta.nextCursor);
+      cursor = meta.nextCursor;
+      if (page === DISCOVERY_MAX_PAGES - 1) throw new Error(`Relay discovery exceeded the ${DISCOVERY_MAX_PAGES}-page bound`);
+    }
+    return { sessions, meta };
+  }
+
+  private async call<T>(method: string, path: string, body?: unknown, idempotencyKey?: string, readOnly = false): Promise<T> {
     if (!/^\/(?!\/)/u.test(path)) throw new Error("Relay paths must begin with exactly one slash");
-    if (method !== "GET" && (!idempotencyKey || idempotencyKey.length < 8 || idempotencyKey.length > 128 || !/^[A-Za-z0-9._:-]+$/u.test(idempotencyKey))) {
+    if (!readOnly && method !== "GET" && (!idempotencyKey || idempotencyKey.length < 8 || idempotencyKey.length > 128 || !/^[A-Za-z0-9._:-]+$/u.test(idempotencyKey))) {
       throw new Error("Relay mutations require an 8-128 character safe idempotency key");
     }
     const endpoint = new URL(path, `${this.apiUrl}/`);

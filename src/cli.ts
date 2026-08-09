@@ -32,6 +32,7 @@ import { formatUntrusted, sanitizeUntrustedText, truncateUtf8 } from "./security
 import { heading, line, printJson, success, warning } from "./cli/output.js";
 import { readCloudCredential, removeCloudCredential, validateStaticToken, writeCloudCredential } from "./cloud/credentials.js";
 import { normalizeCloudApiUrl, RelayClient } from "./cloud/client.js";
+import { cloudAwareWho, type DiscoveryResult } from "./cloud/discovery.js";
 import { readRelayToken, deleteRelayToken } from "./cloud/token-reader.js";
 import { applyCloudConnection } from "./cloud/activation.js";
 import { deriveRepositoryId, isCloudIdentifier } from "./cloud/identifiers.js";
@@ -223,6 +224,23 @@ function printPresence(sessions: SessionRecord[]): void {
   for (const session of sessions) {
     line(`${pc.cyan(session.address)}  ${session.state}  ${session.lastActiveAt}`);
     line(`  ${session.repositoryName}#${session.branch}${session.taskLabel ? ` — ${session.taskLabel}` : ""}`);
+  }
+}
+
+function printDiscovery(result: DiscoveryResult): void {
+  if (result.sessions.length === 0) line("No active sessions found.");
+  for (const session of result.sessions) {
+    const origin = session.origin === "cloud" ? pc.cyan("cloud") : pc.green("local");
+    line(`${origin}  ${pc.bold(session.address)}  ${session.state}  ${session.lastActiveAt}`);
+    line(`  ${session.repositoryName}#${session.branch}${session.taskLabel ? ` — ${session.taskLabel}` : ""}`);
+  }
+  const cloud = result.cloud;
+  if (cloud.status === "degraded") {
+    warning(`Cloud discovery degraded: ${cloud.warning ?? "unavailable"}`);
+  } else if (cloud.status === "unlinked") {
+    warning("Cloud discovery: this repository is not linked to Cloud");
+  } else if (cloud.status === "connected") {
+    line(`Cloud discovery: connected${cloud.matched === null ? "" : ` · ${cloud.matched} Cloud ${cloud.matched === 1 ? "match" : "matches"}`}`);
   }
 }
 
@@ -787,19 +805,53 @@ session
 
 program
   .command("who")
-  .description("List active coding-agent sessions")
+  .description("List active coding-agent sessions (merges Cloud discovery when linked)")
   .option("--repo <identity>")
   .option("--branch <branch>")
   .option("--include-idle", "include idle sessions", true)
   .option("--json")
   .action(async (options: { repo?: string; branch?: string; includeIdle: boolean; json?: boolean }) => {
+    const paths = getPaths();
+    const config = await readConfig(paths);
+    const repository = detectRepository();
+    const repositoryIdentity = options.repo ?? repository.identity;
     const client = await ensureStarted();
-    const query = new URLSearchParams({ includeIdle: String(options.includeIdle) });
-    if (options.repo) query.set("repo", options.repo);
-    if (options.branch) query.set("branch", options.branch);
-    const sessions = await client.get<SessionRecord[]>(`/v1/presence?${query.toString()}`);
-    if (options.json) printJson(sessions);
-    else printPresence(sessions);
+    const listLocal = async (): Promise<SessionRecord[]> => {
+      const query = new URLSearchParams({ includeIdle: String(options.includeIdle) });
+      if (options.repo) query.set("repo", options.repo);
+      if (options.branch) query.set("branch", options.branch);
+      return client.get<SessionRecord[]>(`/v1/presence?${query.toString()}`);
+    };
+    const linked = config.cloud.enabled && config.cloud.organizationId
+      ? await client.get<Array<Record<string, unknown>>>("/v1/cloud/repositories")
+      : [];
+    const match = linked.find((item) => item.repositoryIdentity === repositoryIdentity);
+    const repositoryId = typeof match?.repositoryId === "string" ? match.repositoryId : null;
+    let token: string | null = null;
+    if (config.cloud.enabled && config.cloud.apiUrl && config.cloud.organizationId) {
+      try {
+        token = await readRelayToken(paths);
+      } catch {
+        token = null;
+      }
+    }
+    const result = await cloudAwareWho({
+      config,
+      repositoryIdentity,
+      ...(options.branch ? { branch: options.branch } : {}),
+      includeIdle: options.includeIdle,
+      repositoryId,
+      token,
+      listLocal,
+    });
+    if (options.json) {
+      printJson(result.sessions);
+      if (result.cloud.status === "degraded" && result.cloud.warning) {
+        process.stderr.write(`${pc.yellow("!")} ${result.cloud.warning}\n`);
+      }
+    } else {
+      printDiscovery(result);
+    }
   });
 
 program
