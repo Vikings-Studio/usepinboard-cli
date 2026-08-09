@@ -19,6 +19,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "vitest run",
+    "test:acceptance": "npm run build && node scripts/acceptance-local.mjs",
     "test:watch": "vitest",
     "check": "npm run typecheck && npm run lint && npm test && npm run build",
     "pack:check": "npm pack --dry-run"

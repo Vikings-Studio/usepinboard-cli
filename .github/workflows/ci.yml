@@ -37,6 +37,7 @@ jobs:
           node-version: 24.15.0
           cache: npm
       - run: npm ci
+      - run: npm run test:acceptance
       - run: npm run build
       - run: npm pack
       - run: npm install --global ./usepinboard-cli-*.tgz
