@@ -44,6 +44,9 @@ daemon.stderr.on("data", (chunk) => {
 });
 
 try {
+  const cloudHelp = run(["cloud", "--help"]);
+  if (/\bconnect\b/u.test(cloudHelp)) throw new Error("Legacy static-token cloud connect is still exposed by the packaged CLI");
+
   let ready = false;
   for (let attempt = 0; attempt < 50; attempt += 1) {
     try {

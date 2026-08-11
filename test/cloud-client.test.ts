@@ -91,14 +91,24 @@ describe("relay client", () => {
   it("parses the repository list envelope", async () => {
     const server = createServer((_request, response) => {
       response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({ data: { repositories: [{ id: "repo-1", identity: "https://github.com/example/api", name: "api" }] } }));
+      response.end(JSON.stringify({ data: { repositories: [{
+        id: "repo-1",
+        normalizedIdentity: "github.com/example/api",
+        linkedRemote: "https://github.com/example/api",
+        name: "api",
+      }] } }));
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("test relay did not bind");
     try {
       const client = new RelayClient(`http://127.0.0.1:${address.port}`, "relay_token_0123456789");
-      await expect(client.listRepositories()).resolves.toEqual([{ id: "repo-1", identity: "https://github.com/example/api", name: "api" }]);
+      await expect(client.listRepositories()).resolves.toEqual([{
+        id: "repo-1",
+        normalizedIdentity: "github.com/example/api",
+        linkedRemote: "https://github.com/example/api",
+        name: "api",
+      }]);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }

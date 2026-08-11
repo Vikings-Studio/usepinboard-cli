@@ -70,11 +70,13 @@ function localEntry(session: SessionRecord): DiscoveryEntry {
 }
 
 function cloudEntry(session: RelayDiscoverySession): DiscoveryEntry {
-  const safe = (value: string): string => sanitizeUntrustedText(value).replace(/[^A-Za-z0-9._-]+/gu, "-").slice(0, 256) || "unknown";
   return {
     origin: "cloud",
     id: session.id,
-    address: `team/${safe(session.userId)}/${safe(session.deviceId)}/${safe(session.provider)}@${safe(session.repositoryId)}#${safe(session.branch)}~${session.id}`,
+    // Team sends are user-targeted. Keep this field directly copyable into
+    // `pinboard send`; the session/device/provider details remain available
+    // in their dedicated machine-readable fields below.
+    address: `team/${session.userId}`,
     provider: session.provider,
     repositoryName: session.repositoryId,
     repositoryIdentity: session.repositoryId,

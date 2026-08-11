@@ -21,6 +21,12 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
+      - run: npm run test:acceptance
+      - run: npm run pack:verify
+      - run: npm run pack:check
       - name: Verify release tag matches package version
         run: node -e "const p=require('./package.json');if(process.env.GITHUB_REF_NAME!==('v'+p.version))process.exit(1)"
-      - run: npm publish --access public --provenance
+      - name: Select npm dist-tag
+        id: dist-tag
+        run: node -e "const fs=require('node:fs');const p=require('./package.json');fs.appendFileSync(process.env.GITHUB_OUTPUT,'tag='+(p.version.includes('-')?'next':'latest')+'\n')"
+      - run: npm publish --access public --provenance --tag ${{ steps.dist-tag.outputs.tag }}

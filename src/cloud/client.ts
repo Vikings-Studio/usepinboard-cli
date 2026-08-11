@@ -11,6 +11,13 @@ export interface RelayBootstrap {
   protocolVersion: number;
 }
 
+export interface RelayRepository {
+  id: string;
+  normalizedIdentity: string;
+  name: string;
+  linkedRemote: string | null;
+}
+
 /** @deprecated Use RelayBootstrap instead */
 export type SpikeBootstrap = RelayBootstrap;
 
@@ -171,18 +178,58 @@ export class RelayClient {
     await this.call<unknown>("POST", "/v1/repositories/link", { repositoryId, repositoryIdentity, repositoryName }, repositoryId);
   }
 
-  async listRepositories(): Promise<Array<{ id: string; identity: string; name: string }>> {
-    const value = await this.call<unknown>("GET", "/v1/repositories");
-    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Relay repository list response is incompatible with this CLI");
-    const data = (value as { data?: unknown }).data;
-    if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Relay repository list response is incompatible with this CLI");
-    const repositories = (data as { repositories?: unknown }).repositories;
-    if (!Array.isArray(repositories) || !repositories.every((item) => {
-      if (!item || typeof item !== "object" || Array.isArray(item)) return false;
-      const repository = item as { id?: unknown; identity?: unknown; name?: unknown };
-      return typeof repository.id === "string" && typeof repository.identity === "string" && typeof repository.name === "string";
-    })) throw new Error("Relay repository list response is incompatible with this CLI");
-    return repositories as Array<{ id: string; identity: string; name: string }>;
+  async listRepositories(): Promise<RelayRepository[]> {
+    const visited = new Set<string>();
+    let cursor: string | null = null;
+    let result: RelayRepository[] = [];
+    for (let page = 0; page < DISCOVERY_MAX_PAGES; page += 1) {
+      const query = new URLSearchParams({ limit: "100" });
+      if (cursor !== null) query.set("cursor", cursor);
+      const value = await this.call<unknown>("GET", `/v1/repositories?${query.toString()}`);
+      if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Relay repository list response is incompatible with this CLI");
+      const data = (value as { data?: unknown }).data;
+      if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Relay repository list response is incompatible with this CLI");
+      const repositories = (data as { repositories?: unknown }).repositories;
+      if (!Array.isArray(repositories)) throw new Error("Relay repository list response is incompatible with this CLI");
+      result = result.concat(repositories.map((item) => {
+        if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error("Relay repository list response is incompatible with this CLI");
+        const repository = item as { id?: unknown; normalizedIdentity?: unknown; identity?: unknown; name?: unknown; linkedRemote?: unknown };
+        // `identity` is accepted only for compatibility with the pre-contract
+        // CLI fixture; production Mongo relay returns `normalizedIdentity` and
+        // `linkedRemote`.
+        const normalizedIdentity = typeof repository.normalizedIdentity === "string"
+          ? repository.normalizedIdentity
+          : repository.identity;
+        if (!isCloudIdentifier(repository.id) || typeof normalizedIdentity !== "string" || normalizedIdentity.length < 1
+          || normalizedIdentity.length > 2048 || typeof repository.name !== "string" || repository.name.length < 1
+          || repository.name.length > 256 || (repository.linkedRemote !== undefined && repository.linkedRemote !== null
+            && (typeof repository.linkedRemote !== "string" || repository.linkedRemote.length > 2048))) {
+          throw new Error("Relay repository list response is incompatible with this CLI");
+        }
+        return {
+          id: repository.id,
+          normalizedIdentity,
+          name: repository.name,
+          linkedRemote: typeof repository.linkedRemote === "string" ? repository.linkedRemote : null,
+        };
+      }));
+      const meta = (value as { meta?: unknown }).meta;
+      if (meta !== undefined && (!meta || typeof meta !== "object" || Array.isArray(meta))) {
+        throw new Error("Relay repository list response is incompatible with this CLI");
+      }
+      const rawCursor = (meta as { nextCursor?: unknown } | undefined)?.nextCursor;
+      const nextCursor = rawCursor === null || rawCursor === undefined
+        ? null
+        : typeof rawCursor === "string" && rawCursor.length > 0 && rawCursor.length <= 4096
+          ? rawCursor
+          : (() => { throw new Error("Relay repository list response is incompatible with this CLI"); })();
+      if (nextCursor === null) break;
+      if (visited.has(nextCursor)) throw new Error("Relay returned a repeated repository cursor");
+      visited.add(nextCursor);
+      cursor = nextCursor;
+      if (page === DISCOVERY_MAX_PAGES - 1) throw new Error(`Relay repositories exceeded the ${DISCOVERY_MAX_PAGES}-page bound`);
+    }
+    return result;
   }
 
   async get<T>(path: string): Promise<T> {

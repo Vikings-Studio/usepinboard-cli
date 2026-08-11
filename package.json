@@ -1,6 +1,6 @@
 {
   "name": "@usepinboard/cli",
-  "version": "0.0.0-development",
+  "version": "0.1.0-beta.1",
   "description": "Local-first presence, discovery, messaging, and advisory leases for coding agents.",
   "type": "module",
   "bin": {

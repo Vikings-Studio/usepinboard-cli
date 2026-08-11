@@ -30,12 +30,11 @@ import { runtimeSupported } from "./platform/runtime.js";
 import { readOrCreateLocalSecret } from "./security/local-auth.js";
 import { formatUntrusted, sanitizeUntrustedText, truncateUtf8 } from "./security/untrusted.js";
 import { heading, line, printJson, success, warning } from "./cli/output.js";
-import { readCloudCredential, removeCloudCredential, validateStaticToken, writeCloudCredential } from "./cloud/credentials.js";
-import { normalizeCloudApiUrl, RelayClient } from "./cloud/client.js";
+import { RelayClient } from "./cloud/client.js";
 import { cloudAwareWho, type DiscoveryResult } from "./cloud/discovery.js";
+import { resolveRepositoryLink } from "./cloud/repository-link.js";
 import { readRelayToken, deleteRelayToken } from "./cloud/token-reader.js";
 import { applyCloudConnection } from "./cloud/activation.js";
-import { deriveRepositoryId, isCloudIdentifier } from "./cloud/identifiers.js";
 import { createCredentialStore } from "./auth/credential-store.js";
 import { openBrowser } from "./auth/browser.js";
 import { DEFAULT_API_URL, DEVICE_AUTH_ACCOUNT, DEVICE_AUTH_SERVICE } from "./constants.js";
@@ -49,21 +48,6 @@ function numeric(value: string): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) throw new Error(`${value} is not a number`);
   return parsed;
-}
-
-async function readStaticTokenFromStdin(): Promise<string> {
-  if (process.stdin.isTTY) {
-    throw new Error("The token must be supplied on standard input, for example: `security find-generic-password ... -w | pinboard cloud connect --api https://...`");
-  }
-  const chunks: Buffer[] = [];
-  let bytes = 0;
-  for await (const chunk of process.stdin) {
-    const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
-    bytes += value.length;
-    if (bytes > 8192) throw new Error("Cloud credential input is too large");
-    chunks.push(value);
-  }
-  return validateStaticToken(Buffer.concat(chunks).toString("utf8"));
 }
 
 function provider(value: string): Provider {
@@ -539,46 +523,7 @@ config.command("set").argument("<key>", "idleMinutes or staleMinutes", parseConf
   success(`${key}=${String(next[key])}; restart Pinboard to apply the change`);
 });
 
-const cloud = program.command("cloud").description("Connect to the Pinboard Cloud relay (legacy static-token flow)");
-cloud
-  .command("connect")
-  .requiredOption("--api <url>", "relay base URL")
-  .description("Connect using a static token read only from stdin (legacy)")
-  .action(async (options: { api: string }) => {
-    if (process.platform === "win32") throw new Error("Cloud relay connection is unavailable on Windows until OS credential protection is implemented; Personal remains supported");
-    const paths = getPaths();
-    const token = await readStaticTokenFromStdin();
-    const apiUrl = normalizeCloudApiUrl(options.api);
-    const current = await readConfig(paths);
-    const previousToken = current.cloud.enabled ? await readCloudCredential(paths).catch(() => null) : null;
-    const relay = new RelayClient(apiUrl, token);
-    const bootstrap = await relay.bootstrap();
-    const nextCloud = {
-      enabled: true,
-      apiUrl,
-      organizationId: bootstrap.organizationId,
-      userId: bootstrap.userId,
-      deviceId: bootstrap.deviceId,
-      syncPaused: false,
-    };
-    await ensureDirectories(paths);
-    const client = await ensureStarted();
-    try {
-      await writeCloudCredential(paths, token);
-      await applyCloudConnection({
-        paths,
-        nextCloud,
-        previousCloud: current.cloud,
-        notify: async (cloud) => { await client.post("/v1/cloud/connection", { ...cloud }); },
-      });
-    } catch (error) {
-      if (previousToken) await writeCloudCredential(paths, previousToken).catch(() => undefined);
-      else await removeCloudCredential(paths).catch(() => undefined);
-      throw error;
-    }
-    success(`Organization ${bootstrap.organizationId}; ${bootstrap.repositoryIds.length} allowed repositories`);
-    line("Link a repository with `pinboard repo link` and run `pinboard sync now`.");
-  });
+const cloud = program.command("cloud").description("Inspect or disconnect the authenticated Pinboard Cloud relay");
 cloud.command("status").option("--json").action(async (options: { json?: boolean }) => {
   const client = await ensureStarted();
   const status = await client.get<Record<string, unknown>>("/v1/cloud/status");
@@ -757,15 +702,13 @@ repo
     if (!config.cloud.enabled || !config.cloud.organizationId || !config.cloud.apiUrl) throw new Error("Pinboard Cloud is not connected");
     const repository = detectRepository(path);
     if (repository.identity.startsWith("local:")) throw new Error("A repository with a normalized Git remote is required for Cloud relay");
-    let repositoryId: string;
-    if (options.repositoryId) {
-      if (!isCloudIdentifier(options.repositoryId)) throw new Error("--repository-id must be a stable 1-128 character identifier");
-      repositoryId = options.repositoryId;
-    } else {
-      repositoryId = deriveRepositoryId(repository.identity);
-    }
     const relay = new RelayClient(config.cloud.apiUrl, await readRelayToken(paths));
-    await relay.linkRepository(repositoryId, repository.identity, repository.name);
+    const resolved = await resolveRepositoryLink({
+      relay,
+      repository,
+      ...(options.repositoryId ? { requestedRepositoryId: options.repositoryId } : {}),
+    });
+    const repositoryId = resolved.repositoryId;
     const client = await ensureStarted();
     await client.post("/v1/cloud/repositories", {
       organizationId: config.cloud.organizationId,
@@ -773,7 +716,7 @@ repo
       repositoryIdentity: repository.identity,
       repositoryName: repository.name,
     });
-    success(`Linked ${repository.identity} to ${repositoryId}`);
+    success(`${resolved.disposition === "adopted" ? "Adopted" : "Linked"} ${repository.identity} to ${repositoryId}`);
   });
 repo.command("list").option("--json").action(async (options: { json?: boolean }) => {
   const links = await (await ensureStarted()).get<Array<Record<string, unknown>>>("/v1/cloud/repositories");

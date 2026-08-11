@@ -7,7 +7,7 @@
 - local daemon secret;
 - per-session capabilities;
 - provider configuration and hook trust;
-- future cloud/device credentials.
+- scoped cloud device credentials and organization repository links.
 
 ## Trust boundaries
 
@@ -15,7 +15,7 @@
 2. Identity-bearing operations additionally require the capability issued to that session.
 3. Text supplied by any agent is untrusted even when its session identity is authentic.
 4. Provider hooks are executable code and require explicit user/provider trust.
-5. Future cross-user messages cross an organization and human boundary.
+5. Cross-user messages cross an organization and human boundary and are untrusted even when their sender attribution is valid.
 
 ## Current controls
 
@@ -26,7 +26,9 @@
 - Per-render random boundaries for untrusted text.
 - Control-character removal and boundary escape handling.
 - No shell interpolation for Git repository detection.
-- No cloud connection or telemetry unless the experimental design-partner relay is explicitly connected. Its static token is read only from stdin, stored in a user-owned `0600` regular file, omitted from config/export/log output, and sent only to HTTPS or loopback endpoints without redirects. This file protects against accidental disclosure, not another process already running as the same OS user.
+- No cloud connection or telemetry unless Teams is explicitly connected. WorkOS device authorization issues a scoped, expiring token that is kept in the operating system credential store, omitted from config/export/log output, and sent only to HTTPS or loopback endpoints without redirects. Static-token authentication is not supported.
+- Teams requests derive organization, user, and device authority exclusively from the device token. The relay applies tenant and linked-repository authorization, recipient membership checks, bounded pagination, replay-safe mutation keys, rate limits, and attributed audit records.
+- Cloud discovery returns a canonical user address while retaining session metadata. Messages are committed to the local outbox before delivery, pulled into a deduplicated inbox, and acknowledged with receipts during explicit synchronization.
 - No silent provider configuration edits; `init --configure` is explicit opt-in.
 - Claude settings mutations preserve unrelated values, reject symlinks and malformed JSON, back up before writes, and remove only enumerated Pinboard handlers.
 - User-service definitions contain fixed absolute arguments, no shell interpolation or inherited secrets, restrictive umasks, ownership markers, and rollback on manager failure.
@@ -42,4 +44,4 @@
 
 ## Required future work
 
-Cross-user delivery requires signed provenance, delivery policies, tenant/repository authorization, audit events, key rotation, replay protection, rate limits, abuse controls, and independent review before public beta.
+Before public beta, add automated token renewal/revocation reconciliation, abuse operations, independent security review, and real two-user/multi-machine acceptance. Delivery policies, E2E encryption, wake/resume, and enterprise compliance remain explicit non-features.

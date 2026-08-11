@@ -5,7 +5,11 @@ Pinboard ships one npm package with three runtime roles:
 ```text
 provider MCP process ─┐
 provider hook process ├── authenticated local IPC ── pinboardd ── SQLite
-pinboard CLI ─────────┘
+pinboard CLI ─────────┘                                   │
+                                                        explicit sync
+                                                          │
+                                                          ▼
+                                           HTTPS Teams relay (MongoDB)
 ```
 
 The daemon is the only stateful process and SQLite writer. CLI, MCP, and hook processes are short-lived clients. Every MCP process registers a distinct session, which preserves provider/session attribution without trusting model-supplied identity.
@@ -28,4 +32,4 @@ Node's built-in `node:sqlite` provides a synchronous SQLite API with WAL mode an
 
 ## Product boundary
 
-Personal remains local and network-zero by default. The package also contains an explicitly enabled design-partner relay adapter: static credentials are stored separately from non-secret config, repository linking is opt-in, and additive SQLite inbox/outbox/cursor tables preserve local operation during relay failure. This validation adapter is not WorkOS authentication or production repository authorization. Those capabilities, billing, and cross-user policies belong to the separate Pinboard backend and must use versioned protocol contracts.
+Personal remains local and network-zero by default. Teams is explicitly enabled through WorkOS device authorization. Scoped device credentials live in the operating system credential store, repository linking is opt-in, and additive SQLite inbox/outbox/cursor tables preserve local operation during relay failure. The stateless HTTPS API derives organization and user authority from the device token and persists team state in MongoDB. Synchronization is manual in the private beta; billing, delivery policies, wake/resume, and enterprise controls are not implemented.

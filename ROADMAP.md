@@ -16,17 +16,17 @@ The roadmap is ordered by evidence, not feature count.
 
 ## Teams validation spike
 
-- [x] Experimental static-token client, explicit repository links, and durable one-shot synchronization.
-- [ ] Minimal single-instance relay for design partners.
+- [x] WorkOS device-authenticated client, explicit repository links, and durable one-shot synchronization.
+- [x] Stateless Mongo-backed relay for private-beta validation.
 - [ ] Cross-user presence and messaging on separate machines.
 - [ ] Measure messages sent, replied to, and acted on.
 - [ ] Stop or revise if cross-user communication is not materially useful.
 
 ## Teams platform
 
-- [ ] WorkOS-backed organizations, membership, invitations, and devices.
-- [ ] Durable offline delivery and receipts.
-- [ ] Repository authorization.
+- [x] WorkOS-backed organizations, membership projection, and devices. Invitations remain managed in WorkOS.
+- [x] Durable offline delivery and receipts through explicit synchronization.
+- [x] Organization-scoped repository linking and relay authorization.
 - [ ] Human delivery policies: auto, notify, approve.
 - [ ] Team-wide advisory leases and lightweight audit visibility.
 - [ ] Teams billing at $10 per developer/month.

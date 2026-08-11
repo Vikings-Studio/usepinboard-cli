@@ -2,7 +2,7 @@ export const PACKAGE_NAME = "@usepinboard/cli";
 export const PRODUCT_NAME = "Pinboard";
 export const PROTOCOL_VERSION = 1;
 // Current hosted endpoint until the custom API domain is configured.
-export const DEFAULT_API_URL = "https://pinboard-backend-4p35sr23vq-uc.a.run.app";
+export const DEFAULT_API_URL = "https://usepinboard.com";
 export const DEVICE_AUTH_SERVICE = "usepinboard-cli";
 export const DEVICE_AUTH_ACCOUNT = "device-auth";
 export const DEFAULT_IDLE_MINUTES = 5;

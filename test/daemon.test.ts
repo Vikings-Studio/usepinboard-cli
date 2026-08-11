@@ -8,8 +8,9 @@ import { startDaemon } from "../src/daemon/server.js";
 import type { MessageRecord, SessionRegistration } from "../src/domain/types.js";
 import { temporaryPaths } from "./helpers.js";
 import { readLocalSecret } from "../src/security/local-auth.js";
-import { setCloudConfig } from "../src/config/settings.js";
+import { readConfig, setCloudConfig } from "../src/config/settings.js";
 import { ensureDirectories } from "../src/platform/paths.js";
+import { cloudAwareWho } from "../src/cloud/discovery.js";
 
 async function exists(path: string): Promise<boolean> {
   try {
@@ -57,9 +58,44 @@ describe("daemon IPC", () => {
         repositoryName: repository.name,
       });
       const registration = await client.post<SessionRegistration>("/v1/sessions", { id: randomUUID(), provider: "codex", repository });
+      const discovery = await cloudAwareWho({
+        config: await readConfig(paths),
+        repositoryIdentity: repository.identity,
+        includeIdle: true,
+        repositoryId: "repo.main:1",
+        token: "relay-token",
+        client: {
+          discovery: () => Promise.resolve({
+            sessions: [{
+              id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+              repositoryId: "repo.main:1",
+              provider: "claude-code",
+              providerSessionId: "claude-session-1",
+              branch: "feature",
+              taskLabel: "billing",
+              state: "active",
+              lastActiveAt: "2026-08-11T00:00:00.000Z",
+              userId: "user.name:dev",
+              deviceId: "device.remote:1",
+            }],
+            meta: { reasonCode: null, matched: 1, nextCursor: null },
+          }),
+        },
+        listLocal: () => Promise.resolve([]),
+      });
+      const discovered = discovery.sessions[0];
+      expect(discovered).toMatchObject({
+        address: "team/user.name:dev",
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        provider: "claude-code",
+        providerSessionId: "claude-session-1",
+        deviceId: "device.remote:1",
+        branch: "feature",
+        taskLabel: "billing",
+      });
       await expect(client.post("/v1/messages", {
         senderSessionId: registration.session.id,
-        to: "team/user.name:dev",
+        to: discovered?.address,
         body: "hello team",
       }, registration.capability)).resolves.toMatchObject({ cloud: true, status: "queued" });
       await expect(client.post("/v1/messages", {

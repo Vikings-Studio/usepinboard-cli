@@ -6,7 +6,7 @@
 Pinboard is a local-first communication layer for coding agents. It gives Claude Code, Codex, and future providers a shared view of active sessions, targeted messages, local inboxes, and advisory file leases without requiring a new launcher.
 
 > [!WARNING]
-> This repository is pre-alpha. The offline Personal runtime and reversible local integrations are implemented, but the package is not published. Teams device authentication with a WorkOS-backed organization, repository links, and durable one-shot synchronization are implemented; billing and provider wake/resume are not implemented here yet. A legacy static-token `cloud connect` path remains available for migration.
+> This repository is pre-alpha. The offline Personal runtime and reversible local integrations are implemented, but the package is not published. Teams device authentication with a WorkOS-backed organization, repository links, and durable one-shot synchronization are implemented; billing and provider wake/resume are not implemented here yet.
 
 ## What works
 
@@ -91,7 +91,7 @@ pinboard daemon start|stop|restart|status|run
 pinboard service install|uninstall|start|stop|restart|status
 pinboard integrations list|install|remove|doctor
 pinboard auth login [--api <https-url>] [--no-browser]|status|logout
-pinboard cloud connect --api <https-url> (legacy static-token)|status|disconnect
+pinboard cloud status|disconnect
 pinboard sync now|status|pause|resume
 pinboard repo link [--repository-id <id>]|status|list|unlink
 pinboard session end --id <session-id>
@@ -120,38 +120,23 @@ pinboard auth status
 pinboard auth logout
 ```
 
-The API base currently defaults to `https://pinboard-backend-4p35sr23vq-uc.a.run.app` (the current hosted endpoint until the custom API domain is configured) and can be overridden with `--api <https-url>`. Only HTTPS is accepted except loopback HTTP used by tests. `pinboard auth login` preserves any previously stored access token: if the Cloud connection activation fails, the prior token is restored, otherwise the newly issued token is removed. `pinboard auth logout` removes the local token; it does not claim server-side revocation. On platforms without a secure credential store the CLI fails closed with an actionable error rather than falling back to plaintext token persistence.
+The API base defaults to `https://usepinboard.com` and can be overridden with `--api <https-url>`. Only HTTPS is accepted except loopback HTTP used by tests. `pinboard auth login` preserves any previously stored access token: if the Cloud connection activation fails, the prior token is restored, otherwise the newly issued token is removed. `pinboard auth logout` removes the local token; it does not claim server-side revocation. On platforms without a secure credential store the CLI fails closed with an actionable error rather than falling back to plaintext token persistence.
 
 ## Teams: repository links and synchronization
 
 After device login, link repositories and synchronize. Repository linking uploads the normalized Git remote, repository name, branch, provider, provider session reference, and optional deterministic task label. It never uploads the local repository root, raw prompt, file contents, or local daemon credentials.
 
 ```bash
-pinboard repo link            # derives a repository id from the Git remote
+pinboard repo link            # adopts an existing org link, or creates one if authorized
 pinboard repo link --repository-id <id>
 pinboard sync now
 ```
 
-`pinboard repo link` derives a stable repository id from the normalized Git remote by default; `--repository-id` overrides it. `pinboard sync now` performs durable one-shot synchronization: it pushes presence, replays the outbox, pulls the inbox, and flushes receipts.
+`pinboard repo link` first checks the organization's existing repository links. Any active member can adopt a matching link into their local daemon; only an owner/admin can create a new organization link. New links derive a stable repository id from the normalized Git remote by default, and `--repository-id` overrides that new id. `pinboard sync now` performs durable one-shot synchronization: it pushes presence, replays the outbox, pulls the inbox, and flushes receipts.
 
 Synchronization is manual. Messages addressed to `team/<user-id>` are committed to the local SQLite outbox before network delivery. Inbox pages restart from the newest page on every sync and deduplicate by remote message ID, so reconnects do not skip messages. `pinboard cloud disconnect` preserves Personal data and refuses to strand pending work unless `--discard-pending` is explicit.
 
 Each session sync reads at most 20 pages of 100 pending messages. The relay enforces a 1,000-message recipient pending quota and excludes read, expired, and other-device claimed messages, keeping the bound reachable; exceeding it is reported as a deferred session failure while outbox and receipt flushing continues. Local data export intentionally excludes the cloud cache and queue tables; disconnect or retain the marked Pinboard data directory for recovery instead.
-
-## Legacy static-token cloud connect
-
-The original validation relay accepted static tokens. That path remains supported only for migration from the design-partner period; new connections should use `pinboard auth login`. Static tokens are accepted only on standard input: they cannot be passed as command arguments or environment options and are never printed, exported, or included in diagnostics.
-
-The legacy connection is macOS/Linux-only. Windows Personal remains supported at its existing beta level, but cloud connection is refused until Windows Credential Manager or DPAPI protection is implemented.
-
-```bash
-your-secret-manager read pinboard-design-partner-token \
-  | pinboard cloud connect --api https://relay.example.com
-pinboard repo link
-pinboard sync now
-```
-
-Only HTTPS relay URLs are accepted, except loopback HTTP used by tests. The static-token `cloud connect` flow uses the same repository link and synchronization machinery described above.
 
 ## Teams: cloud-aware discovery
 
@@ -165,9 +150,11 @@ Discovery is local-first:
 
 `who --json` preserves its existing array envelope; each session carries an `origin` field plus the usual local fields. The MCP `who` envelope keeps `sessions` and `leases` and adds a `cloud` object with `status` (`disabled`, `unlinked`, `connected`, or `degraded`), `reasonCode`, `matched`, and a sanitized `warning`. Discovery queries are bounded to 20 pages of 100 sessions with repeated-cursor detection, and the request body carries only the discovery contract fields—never `organizationId`, `userId`, or `deviceId`, which come exclusively from the device token.
 
+Cloud discovery reports the canonical copyable address `team/<userId>`, which is accepted directly by `pinboard send`. Session-specific metadata remains available separately (`id`, `deviceId`, provider/provider session, repository, branch, task, state, and last activity), because Teams delivery targets an active organization member rather than one transient agent session.
+
 ## Privacy and security
 
-Personal data stays on the machine and Personal mode performs no network requests. The daemon contacts the Cloud relay only after an explicit connection (`pinboard auth login` or the legacy `cloud connect`); telemetry remains absent. Local IPC uses a permissioned endpoint and a random local bearer secret.
+Personal data stays on the machine and Personal mode performs no network requests. The daemon contacts the Cloud relay only after an explicit WorkOS device connection through `pinboard auth login`; telemetry remains absent. Local IPC uses a permissioned endpoint and a random local bearer secret.
 
 Identity-bearing agent operations additionally require a per-session capability whose hash is stored in SQLite and omitted from exports. MCP integrations manage this capability internally; low-level session-scoped CLI commands accept it through `PINBOARD_SESSION_CAPABILITY` for diagnostics and automation.
 

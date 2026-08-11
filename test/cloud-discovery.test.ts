@@ -236,7 +236,17 @@ describe("cloud-aware discovery coordinator", () => {
     expect(result.cloud).toEqual({ status: "connected", reasonCode: "OK", matched: 1, warning: null });
     expect(result.sessions).toHaveLength(3);
     expect(new Set(result.sessions.map((session) => session.origin))).toEqual(new Set(["local", "cloud"]));
-    expect(result.sessions[0]).toMatchObject({ origin: "cloud", id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", userId: "user_1", deviceId: "device_1" });
+    expect(result.sessions[0]).toMatchObject({
+      origin: "cloud",
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      address: "team/user_1",
+      userId: "user_1",
+      deviceId: "device_1",
+      provider: "claude-code",
+      providerSessionId: "provider-session-1",
+      repositoryIdentity: "repo-1",
+      branch: "feature",
+    });
     expect(relay.discovery).toHaveBeenCalledTimes(1);
     expect(relay.discovery).toHaveBeenCalledWith({ repositoryId: "repo-1", includeIdle: true, branch: "main" });
   });
@@ -257,7 +267,7 @@ describe("cloud-aware discovery coordinator", () => {
     const local = result.sessions.find((session) => session.origin === "local");
     const cloud = result.sessions.find((session) => session.origin === "cloud");
     expect(local).toMatchObject({ providerSessionId: "ps-1", pid: 123, repositoryRoot: "/tmp/repo" });
-    expect(cloud).toMatchObject({ providerSessionId: "provider-session-1", pid: null, userId: "user_1", deviceId: "device_1" });
+    expect(cloud).toMatchObject({ address: "team/user_1", providerSessionId: "provider-session-1", pid: null, userId: "user_1", deviceId: "device_1" });
   });
 
   it("returns local results plus a sanitized warning when the Cloud fetch fails", async () => {
