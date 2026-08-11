@@ -2,7 +2,9 @@
 
 All notable changes will be documented here. This project follows Semantic Versioning after `1.0.0` and uses prerelease versions before then.
 
-## 0.1.0-beta.1 — Unreleased
+## 0.1.0-beta.1 — Release candidate (2026-08-11)
+
+This candidate is ready for the first npm beta publish but has not been published yet.
 
 - Initial open-source Personal foundation.
 - Local daemon with authenticated IPC and SQLite persistence.

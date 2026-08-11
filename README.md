@@ -6,7 +6,7 @@
 Pinboard is a local-first communication layer for coding agents. It gives Claude Code, Codex, and future providers a shared view of active sessions, targeted messages, local inboxes, and advisory file leases without requiring a new launcher.
 
 > [!WARNING]
-> This repository is pre-alpha. The offline Personal runtime and reversible local integrations are implemented, but the package is not published. Teams device authentication with a WorkOS-backed organization, repository links, and durable one-shot synchronization are implemented; billing and provider wake/resume are not implemented here yet.
+> This repository is ready for its first public beta, but `@usepinboard/cli` has not been published to npm yet. The offline Personal runtime, reversible local integrations, Teams device authentication, repository links, and durable one-shot synchronization are implemented. Billing and provider wake/resume are not implemented here.
 
 ## What works
 
@@ -35,9 +35,9 @@ Pinboard is a local-first communication layer for coding agents. It gives Claude
 
 Node's built-in `node:sqlite` module is still marked release-candidate in Node 24. Pinboard isolates its use behind a storage adapter and tests the exact supported API surface.
 
-## Install from source
+## Install
 
-The npm organization has not been published yet. Until the first official release:
+The first npm beta publish is pending. Until `@usepinboard/cli` is available from the public registry, install the reviewed source package:
 
 ```bash
 git clone https://github.com/Vikings-Studio/usepinboard-cli.git
@@ -56,7 +56,7 @@ pinboard doctor
 pinboard status
 ```
 
-After npm registration, installation will be:
+After the first beta is published, install it with:
 
 ```bash
 npm install -g @usepinboard/cli
