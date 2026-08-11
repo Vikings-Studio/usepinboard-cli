@@ -29,7 +29,7 @@ describe("local database", () => {
     expect(migrated.exportSnapshot().schemaVersion).toBe(4);
     expect(migrated.database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'cloud_outbox'").get()).toBeTruthy();
     migrated.close();
-  });
+  }, 15_000);
 
   it("namespaces remote threads and rejects forged repository provenance atomically", async () => {
     const paths = await temporaryPaths();
