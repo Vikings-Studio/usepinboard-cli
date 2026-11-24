@@ -1,14 +1,23 @@
 name: Dependency review
 
+# Runs only on pull requests labelled `ci` (or `release`), to save Actions minutes.
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}${{ ((github.event.action == 'labeled' && github.event.label.name != 'ci' && github.event.label.name != 'release') || (github.event_name == 'push' && !contains(github.event.head_commit.message, '[release]') && !contains(github.event.head_commit.message, '[deploy]'))) && format('-noop-{0}', github.run_id) || '' }}
+  cancel-in-progress: true
+
 jobs:
   dependency-review:
+    if: >-
+      (github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release')) && (github.event.action != 'labeled' || github.event.label.name == 'ci' || github.event.label.name == 'release'))
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: actions/dependency-review-action@v5
